@@ -214,18 +214,36 @@ function setup() {
   if (pi && me && pi !== me) { ui.alert('Not allowed', 'This system was set up by ' + pi + '. Only that account can repair it.', ui.ButtonSet.OK); return; }
   if (!pi) P.setProperty('PI_EMAIL', me);
   P.setProperty('DATA_ID', ss.getId());
-  const bad = checkHeaders_(ss);
-  if (bad) { ui.alert('Stopped', bad + '\n\nNothing was changed.', ui.ButtonSet.OK); return; }
+  const up = upgradeRecords_(ss, ui);
+  if (up === false) { ui.alert('Stopped', 'The summaries were not upgraded.\n\nNothing was changed.', ui.ButtonSet.OK); return; }
   buildAll_(ss);
   P.setProperty('SCHEMA_VER', String(CFG.SCHEMA_VER));
   P.setProperty('VERSION', CFG.VERSION);
-  ui.alert('Set up complete', 'Tabs are ready. ' + seedNote_(ss) + '\n\nNext: Deploy > New deployment > Web app (Execute as: Me, Who has access: Anyone), then ' + CFG.MENU + ' > PI: manage users, then PI: invite a phone (invite yourself first).', ui.ButtonSet.OK);
+  ui.alert('Set up complete', (up ? up + '\n\n' : '') + 'Tabs are ready. ' + seedNote_(ss) + '\n\nNext: Deploy > New deployment > Web app (Execute as: Me, Who has access: Anyone), then ' + CFG.MENU + ' > PI: manage users, then PI: invite a phone (invite yourself first).', ui.ButtonSet.OK);
 }
-// Only the records tab is guarded: a new layout is applied to it only while it holds no records. Support tabs are moved by column name.
-function checkHeaders_(ss) {
+// Summaries saved in an older column layout are moved into the current one by column name, after the PI agrees.
+// A full copy of the old tab is kept first, so values in columns that no longer exist are never lost.
+// Returns '' when nothing was needed, a report when it upgraded, or false when the PI cancelled.
+function upgradeRecords_(ss, ui) {
   const sh = ss.getSheetByName('DISCHARGES'), cols = DCOLS.map(function (c) { return c.key; });
-  if (!sh || headerOk_(sh, cols)) return '';
-  return sh.getLastRow() > 1 ? 'The tab DISCHARGES already holds records in an older layout. Ask Claude for the upgrade before running setup.' : '';
+  if (!sh || headerOk_(sh, cols) || sh.getLastRow() <= 1) return '';
+  const width = sh.getMaxColumns(), n = sh.getLastRow() - 1;
+  const head = sh.getRange(1, 1, 1, width).getValues()[0].map(cellTxt_);
+  const vals = sh.getRange(2, 1, n, width).getValues();
+  const removed = head.filter(function (h) { return h && cols.indexOf(h) < 0; }).map(function (h) {
+    const i = head.indexOf(h), filled = vals.filter(function (v) { return cellTxt_(v[i]).trim() !== ''; }).length;
+    return h + ' (' + filled + ' filled)';
+  });
+  const added = cols.filter(function (k) { return head.indexOf(k) < 0; });
+  const ok = ui.alert('Upgrade ' + n + ' summar' + (n === 1 ? 'y' : 'ies') + '?', 'The DISCHARGES tab has ' + n + ' summar' + (n === 1 ? 'y' : 'ies') + ' in the older layout. Each one is moved into the new layout by column name.\n\n' +
+    'New columns: ' + (added.join(', ') || 'none') + '\nColumns no longer used: ' + (removed.join(', ') || 'none') +
+    '\n\nA full copy of the tab is kept first as DISCHARGES_backup, so nothing is lost.', ui.ButtonSet.OK_CANCEL);
+  if (ok !== ui.Button.OK) return false;
+  const stamp = Utilities.formatDate(new Date(), CFG.TZ, 'yyyy-MM-dd HHmm');
+  sh.copyTo(ss).setName('DISCHARGES_backup ' + stamp);
+  rewriteTab_(sh, cols);
+  logIt_(me_(), 'summaries upgraded', '', n + ' rows; removed ' + (removed.join(', ') || 'none'));
+  return n + ' summar' + (n === 1 ? 'y' : 'ies') + ' moved to the new layout. The old tab is kept as "DISCHARGES_backup ' + stamp + '".' + (removed.length ? ' Columns no longer used: ' + removed.join(', ') + ' (still in the backup).' : '');
 }
 function sheet_(ss, name, cols, opts) {
   let sh = ss.getSheetByName(name);
