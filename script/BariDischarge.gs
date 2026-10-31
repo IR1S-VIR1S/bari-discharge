@@ -202,8 +202,9 @@ function onOpen() {                      // used only when this file is pasted o
   m.addToUi();
 }
 // What the loader calls. Every entry point must be listed here.
+const RELEASE_NOTE = 'obstetric layout, templates, upgrade of older summaries';   // shown by "PI: install update"
 function exports_() {
-  return { VERSION: CFG.VERSION, SCHEMA_VER: CFG.SCHEMA_VER, MENU: CFG.MENU, MENU_ITEMS: MENU_ITEMS,
+  return { VERSION: CFG.VERSION, RELEASE_NOTE: RELEASE_NOTE, SCHEMA_VER: CFG.SCHEMA_VER, MENU: CFG.MENU, MENU_ITEMS: MENU_ITEMS,
     setup: setup, menuUsers: menuUsers, menuInvite: menuInvite, menuRevoke: menuRevoke, menuApproveQuick: menuApproveQuick, doGet: doGet, doPost: doPost };
 }
 
