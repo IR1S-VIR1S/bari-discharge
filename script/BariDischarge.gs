@@ -24,8 +24,8 @@
  *    5. Deploy > New deployment > Web app; Execute as: Me; Who has access: Anyone.
  *    6. Bari Discharge > PI: manage users, then PI: invite a phone.
  *  Running setup again is safe: it repairs missing parts and never deletes data.
- *  To change the script later: paste the new code into the SAME project, then
- *  Deploy > Manage deployments > pencil > Version: New version > Deploy. Never "New deployment".
+ *  Normally this file is not pasted at all: the sheet holds Loader.gs, which runs the version of this
+ *  file the PI approved with Bari Discharge > PI: install update (one click, no code to type).
  * ============================================================================
  */
 
@@ -193,18 +193,18 @@ function cellTxt_(v) {
   return v === null || v === undefined ? '' : String(v);
 }
 
-function onOpen() {
-  SpreadsheetApp.getUi().createMenu(CFG.MENU)
-    .addItem('PI: set up or repair', 'setup')
-    .addItem('PI: manage users', 'menuUsers')
-    .addItem('PI: invite a phone', 'menuInvite')
-    .addItem('PI: revoke a phone', 'menuRevoke')
-    .addSeparator()
-    .addItem('PI: approve all draft quick buttons', 'menuApproveQuick')
-    .addSeparator()
-    .addItem('PI: update the script from GitHub', 'menuUpdateScript')
-    .addItem('How to update without re-inviting', 'menuUpdateHelp')
-    .addToUi();
+// The sheet menu. The loader (Loader.gs) builds the same menu from this list, so a new item needs no change to the loader.
+const MENU_ITEMS = [['PI: set up or repair', 'setup'], ['PI: manage users', 'menuUsers'], ['PI: invite a phone', 'menuInvite'], ['PI: revoke a phone', 'menuRevoke'],
+  ['PI: approve all draft quick buttons', 'menuApproveQuick']];
+function onOpen() {                      // used only when this file is pasted on its own instead of the loader
+  const m = SpreadsheetApp.getUi().createMenu(CFG.MENU);
+  MENU_ITEMS.forEach(function (it) { m.addItem(it[0], it[1]); });
+  m.addToUi();
+}
+// What the loader calls. Every entry point must be listed here.
+function exports_() {
+  return { VERSION: CFG.VERSION, SCHEMA_VER: CFG.SCHEMA_VER, MENU: CFG.MENU, MENU_ITEMS: MENU_ITEMS,
+    setup: setup, menuUsers: menuUsers, menuInvite: menuInvite, menuRevoke: menuRevoke, menuApproveQuick: menuApproveQuick, doGet: doGet, doPost: doPost };
 }
 
 // ---------------------------------------------------------------- setup
@@ -248,7 +248,8 @@ function buildAll_(ss) {
   seedQuick_(q);
   q.getRange(1, 1, 1, QUICK_COLS.length).setNotes([['Made by the system', 'Which section the button belongs to: ' + SECTIONS.join(', '), 'A heading that groups buttons inside a section',
     'N = new line, S = same line, C = same line after a comma', 'The text the button inserts. ___ marks a blank the doctor fills in', 'draft = PI phone only until approved; live = everyone', '', '', 'D or H: shown only when the Diabetes or Hypertension box is ticked']]);
-  seedDefault_(sheet_(ss, 'TEMPLATES', TEMPLATE_COLS, { wide: SECTIONS }));
+  const tp = sheet_(ss, 'TEMPLATES', TEMPLATE_COLS, { wide: SECTIONS });
+  seedDefault_(tp); seedTemplates_(tp);
   const st = sheet_(ss, 'STAFF', STAFF_COLS);
   if (st.getLastRow() < 2) st.getRange(2, 1, SEED_STAFF.length, STAFF_COLS.length).setValues(SEED_STAFF);
   st.getRange(1, 1, 1, STAFF_COLS.length).setNotes([['Name as printed', 'consultant or mo', 'Printed under the name, e.g. Gynaecologist & Obstetrician', 'Degrees, e.g. MBBS, FCPS', 'Personal number printed on that consultant\u2019s summaries']]);
@@ -400,6 +401,33 @@ function seedQuick_(sh) {
   P.setProperty('SEED_VER', SEED_VER);
   return add.length;
 }
+// Starter whole-summary templates (drafts for the PI to review; edit or delete them in the TEMPLATES tab). Consultants add more from any summary.
+const TPL_SEED_VER = '1';
+const MEDS_LSCS = 'Cap. Cefixime 400 mg once daily for 5 days\nTab. Paracetamol 500 mg, 2 tablets three times daily for 5 days\nTab. Ferrous sulphate with folic acid once daily for 6 weeks\nTab. Calcium with vitamin D once daily for 6 weeks';
+const FU_LSCS = 'Stitch removal after 7 days\nKeep the wound clean and dry\nBreastfeeding encouraged\nAvoid lifting heavy weight for 6 weeks\nPostnatal follow up after 6 weeks\nCome back at once in case of fever, bleeding, wound discharge or severe pain';
+const SEED_TEMPLATES = [
+  { name: 'Elective LSCS', final_diagnoses: 'Delivered by elective lower segment caesarean section', history: 'Booked patient\nAdmitted for elective caesarean section',
+    course: 'Elective lower segment caesarean section performed\nInj. Ceftriaxone 1 g IV twice daily given\nPatient improved and discharged in stable condition', discharge_meds: MEDS_LSCS, follow_up: FU_LSCS },
+  { name: 'Emergency LSCS', final_diagnoses: 'Delivered by emergency lower segment caesarean section', history: 'Presented with labour pains',
+    course: 'Emergency lower segment caesarean section performed\nInj. Ceftriaxone 1 g IV twice daily given\nPatient improved and discharged in stable condition', discharge_meds: MEDS_LSCS, follow_up: FU_LSCS },
+  { name: 'Normal delivery', final_diagnoses: 'Delivered by spontaneous vaginal delivery', history: 'Presented with labour pains',
+    course: 'Spontaneous vaginal delivery conducted\nPatient improved and discharged in stable condition',
+    discharge_meds: 'Tab. Paracetamol 500 mg, 2 tablets three times daily for 3 days\nTab. Ferrous sulphate with folic acid once daily for 6 weeks\nTab. Calcium with vitamin D once daily for 6 weeks',
+    follow_up: 'Breastfeeding encouraged\nPostnatal follow up after 6 weeks\nCome back at once in case of fever, heavy bleeding or severe pain' }
+];
+function seedTemplates_(sh) {
+  const P = props_();
+  if (P.getProperty('TPL_SEED_VER') === TPL_SEED_VER) return;
+  const have = readRows_(sh, TEMPLATE_COLS), names = have.map(function (t) { return t.name.toLowerCase(); });
+  let top = have.reduce(function (m, r) { const x = /^t(\d+)$/.exec(r.tid); return x ? Math.max(m, +x[1]) : m; }, 0);
+  SEED_TEMPLATES.forEach(function (st) {
+    if (names.indexOf(st.name.toLowerCase()) >= 0) return;                 // never overwrite a template of the same name
+    const t = { tid: 't' + (++top), saved_by: 'starter (please review)', saved_on: todayIso_() };
+    TEMPLATE_COLS.forEach(function (k) { if (st[k] !== undefined) t[k] = st[k]; });
+    writeRow_(sh, TEMPLATE_COLS, sh.getLastRow() + 1, t);
+  });
+  P.setProperty('TPL_SEED_VER', TPL_SEED_VER);
+}
 function seedDefault_(sh) {
   if (readRows_(sh, TEMPLATE_COLS).some(function (t) { return t.name.toLowerCase() === 'default'; })) return;
   const t = { tid: 't0', saved_by: 'starter', saved_on: todayIso_() };
@@ -460,7 +488,7 @@ function menuInvite() {
   requirePI_();
   const ui = SpreadsheetApp.getUi(), P = props_();
   if (!P.getProperty('API_URL')) {
-    const svc = ScriptApp.getService(), live = svc && svc.getUrl ? svc.getUrl() : '';
+    let live = ''; try { const svc = ScriptApp.getService(); live = svc && svc.getUrl ? svc.getUrl() : ''; } catch (e) { /* not needed: the address is pasted */ }
     const q = ui.prompt('Web app address', 'Paste the web app URL from Deploy > Manage deployments (it ends with /exec). Asked only once.' + (live ? '\n\nThe project reports: ' + live : ''), ui.ButtonSet.OK_CANCEL);
     if (q.getSelectedButton() !== ui.Button.OK) return;
     const api = q.getResponseText().trim();
@@ -715,68 +743,4 @@ function templateDelete_(u, req) {
     if (r) { sh.deleteRow(r._row); logIt_(u.email, 'template deleted', '', r.name); }
     return { ok: true };
   });
-}
-
-// ---------------------------------------------------------------- update this script from GitHub (PI only, confirmed with the 8-character code)
-const UPDATE_SRC = 'https://raw.githubusercontent.com/IR1S-VIR1S/bari-discharge/main/script/BariDischarge.gs';
-function menuUpdateHelp() {
-  SpreadsheetApp.getUi().alert('Update without re-inviting anyone',
-    '1. Extensions > Apps Script. Select all the code, paste the new version over it, Save.\n\n' +
-    '2. Deploy > Manage deployments > the pencil > Version: "New version" > Deploy. Never "New deployment": that makes a new address and every phone would need an invitation.\n\n' +
-    '3. Reload this workbook.\n\nOr use "PI: update the script from GitHub" with the update code given in the chat.', SpreadsheetApp.getUi().ButtonSet.OK);
-}
-function hex_(bytes) { return bytes.map(function (b) { return ('0' + (b < 0 ? b + 256 : b).toString(16)).slice(-2); }).join(''); }
-function sha256hex_(text) { return hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, text, Utilities.Charset.UTF_8)); }
-function scriptApi_(method, path, body) {
-  const r = UrlFetchApp.fetch('https://script.googleapis.com/v1/' + path, { method: method, contentType: 'application/json', muteHttpExceptions: true,
-    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, payload: body ? JSON.stringify(body) : undefined });
-  const code = r.getResponseCode(), text = r.getContentText();
-  if (code >= 300) {
-    const raw = '\n\nGoogle said: ' + String(text).replace(/\s+/g, ' ').slice(0, 300);
-    if (code === 403 && /User has not enabled the Apps Script API/i.test(text)) throw new Error('The Apps Script API is off for your account. Open https://script.google.com/home/usersettings , turn it on, wait a few minutes and try again.' + raw);
-    if (code === 403 && /SERVICE_DISABLED|has not been used in project|accessNotConfigured/i.test(text)) { const m = /project[ =](\d+)/i.exec(text); throw new Error('The Apps Script API is not on in the Google Cloud project behind this script' + (m ? ' (project ' + m[1] + ')' : '') + '. Send this message to Claude.' + raw); }
-    throw new Error('Google answered with error ' + code + '. Check the oauthScopes in appsscript.json.' + raw);
-  }
-  return text ? JSON.parse(text) : {};
-}
-function menuUpdateScript() {
-  requirePI_();
-  const ui = SpreadsheetApp.getUi(), id = ScriptApp.getScriptId();
-  const stop = function (t, m) { ui.alert(t, m + '\n\nNothing was changed.', ui.ButtonSet.OK); };
-  let res;
-  try { res = UrlFetchApp.fetch(UPDATE_SRC + '?t=' + Date.now(), { muteHttpExceptions: true }); } catch (e) { stop('Could not reach GitHub', String(e.message || e)); return; }
-  if (res.getResponseCode() !== 200) { stop('Could not read the new script', 'GitHub answered ' + res.getResponseCode() + '.'); return; }
-  const code = res.getContentText(), hash = sha256hex_(code);
-  const missing = ['onOpen', 'doPost', 'menuUpdateScript', 'setup'].filter(function (m) { return code.indexOf('function ' + m) < 0; });
-  if (missing.length) { stop('The new script looks incomplete', 'It lacks: ' + missing.join(', ') + '.'); return; }
-  let changed = false;
-  try {
-    const cur = scriptApi_('GET', 'projects/' + id + '/content');
-    const mine = (cur.files || []).filter(function (f) { return f.type === 'SERVER_JS' && /function onOpen\b/.test(f.source || ''); });
-    if (mine.length !== 1) { stop('Cannot tell which file is the script', 'Found ' + mine.length + '. Update by pasting instead.'); return; }
-    const curHash = sha256hex_(mine[0].source);
-    if (curHash === hash) { ui.alert('Already up to date', 'Code ' + hash.slice(0, 8) + ' is installed.', ui.ButtonSet.OK); return; }
-    const ask = ui.prompt('Update the script', 'Installed: code ' + curHash.slice(0, 8) + '.\n\nType the 8-character update code Claude gave you in the chat. If you have none, press Cancel.', ui.ButtonSet.OK_CANCEL);
-    if (ask.getSelectedButton() !== ui.Button.OK) return;
-    if (ask.getResponseText().trim().toLowerCase() !== hash.slice(0, 8)) { stop('The code does not match', 'The file on GitHub is not the one the code is for, or the code was mistyped.'); return; }
-    const stamp = nowTxt_();
-    const before = scriptApi_('POST', 'projects/' + id + '/versions', { description: 'before update ' + stamp + ' (' + curHash.slice(0, 8) + ')' });
-    mine[0].source = code;
-    scriptApi_('PUT', 'projects/' + id + '/content', { files: cur.files.map(function (f) { return { name: f.name, type: f.type, source: f.source }; }) });
-    changed = true;
-    const after = scriptApi_('POST', 'projects/' + id + '/versions', { description: 'update ' + stamp + ' (' + hash.slice(0, 8) + ')' });
-    const deps = (scriptApi_('GET', 'projects/' + id + '/deployments').deployments || []).filter(function (d) {
-      return d.deploymentConfig && d.deploymentConfig.versionNumber && (d.entryPoints || []).some(function (x) { return x.entryPointType === 'WEB_APP'; });
-    });
-    let where;
-    if (deps.length === 1) {
-      scriptApi_('PUT', 'projects/' + id + '/deployments/' + deps[0].deploymentId, { deploymentConfig: { scriptId: id, versionNumber: after.versionNumber, manifestFileName: 'appsscript', description: 'update ' + stamp } });
-      where = 'The web app moved to version ' + after.versionNumber + ' at the same address.';
-    } else where = 'The web app was NOT moved (' + deps.length + ' web app deployments found). Deploy > Manage deployments > pencil > New version > Deploy.';
-    logIt_(me_(), 'script updated', '', curHash.slice(0, 8) + ' to ' + hash.slice(0, 8));
-    ui.alert('Script updated', 'Code ' + hash.slice(0, 8) + ' installed.\n\n' + where + '\n\nReload the workbook. To undo: Manage deployments > pencil > version ' + before.versionNumber + '.', ui.ButtonSet.OK);
-  } catch (e) {
-    if (changed) ui.alert('The update stopped part way', 'The new code is installed but the web app was not moved. ' + String(e.message || e) + '\n\nDeploy > Manage deployments > pencil > New version > Deploy.', ui.ButtonSet.OK);
-    else stop('The update did not finish', String(e.message || e));
-  }
 }

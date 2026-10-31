@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.0';
-const BUILD_ID = '443969021095';
+const BUILD_ID = 'b488749773b6';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -478,7 +478,7 @@ function insertPhrase(ta, q) {
 }
 function applyTemplate(t) {
   const v = T.form.vals;
-  SECTIONS.forEach((k) => { if (s_(t[k])) v[k] = s_(v[k]) ? s_(v[k]) + '\n' + t[k] : t[k]; });
+  SECTIONS.forEach((k) => { if (s_(t[k])) v[k] = t[k]; });                 // the template's text replaces what is there (usually the Default)
   T.form.dirty = true; render(); toast('Template "' + t.name + '" added');
 }
 function addButton(k, ta, groups) {
@@ -524,10 +524,21 @@ function finaliseForm() {
     modal('Not ready to finalise', el('div', null, el('p', null, 'Fill in:'), el('ul', null, gaps.map((g) => el('li', null, g)))), [['OK', () => { const k = FINAL_NEEDS.filter((x) => !s_(v[x]))[0]; setTimeout(() => focusField(k), 50); }, 'primary']]);
     return;
   }
-  modal('Finalise this summary?', el('p', null, 'It is marked final with your name. Only a consultant can change it afterwards.'), [['Cancel', null], ['Finalise', () => {
+  let asTpl = false;
+  const tplName = el('input', { type: 'text', id: 'fin-tpl-name', maxlength: '60', value: s_(v.final_diagnoses).split('\n')[0].slice(0, 60), hidden: true });
+  const tplBox = el('button', { class: 'chip box', type: 'button', id: 'fin-tpl', role: 'checkbox', 'aria-checked': 'false', onclick: (e) => {
+    asTpl = !asTpl; e.currentTarget.classList.toggle('on', asTpl); e.currentTarget.setAttribute('aria-checked', asTpl ? 'true' : 'false');
+    e.currentTarget.textContent = (asTpl ? '\u2611 ' : '\u2610 ') + 'Also save as a template'; tplName.hidden = !asTpl; if (asTpl) tplName.focus();
+  } }, '\u2610 Also save as a template');
+  modal('Finalise this summary?', el('div', null, el('p', null, 'It is marked final with your name. Only a consultant can change it afterwards.'),
+    can('template') ? el('div', null, tplBox, tplName, el('p', { class: 'small muted' }, 'A template keeps the clinical sections only, never the patient\u2019s details. The same name replaces an older template.')) : null),
+  [['Cancel', null], ['Finalise', () => {
     v.status = 'F'; T.form.dirty = true;
-    if (saveForm(false)) { const uid = T.form.uid; T.form = null; T.nav.pop(); T.nav.push({ name: 'view', p: { uid } }); render(); toast('Finalised'); }
-    else v.status = 'D';
+    const sections = {}; SECTIONS.forEach((k) => { sections[k] = s_(v[k]); });
+    if (saveForm(false)) {
+      const uid = T.form.uid; T.form = null; T.nav.pop(); T.nav.push({ name: 'view', p: { uid } }); render(); toast('Finalised');
+      if (asTpl) sendTemplate(s_(tplName.value), sections);
+    } else v.status = 'D';
   }, 'primary']]);
 }
 
@@ -563,13 +574,25 @@ function conflictCard(c) {
       el('button', { class: 'chip', type: 'button', id: 'keep-mine', onclick: async () => { Object.keys(c.values).forEach((k) => { c.base[k] = s_(cur0[k]); }); c.status = 'pending'; c.errors = null; c.rev++; await saveState(); sync(); render(); } }, 'Keep mine'),
       el('button', { class: 'chip', type: 'button', id: 'use-theirs', onclick: async () => { S.outbox.splice(S.outbox.indexOf(c), 1); await saveState(); sync(); render(); } }, 'Use theirs')));
 }
+function sendTemplate(name, values) {
+  if (name.length < 2) { toast('Template not saved: give it a name'); return; }
+  if (!navigator.onLine) { toast('Template not saved: no signal. Save it later from the summary page.'); return; }
+  api({ op: 'template_save', token: S.cfg.token, name, values, by: S.cfg.name }).then(async (x) => {
+    toast(x.ok ? (x.replaced ? 'Template "' + name + '" replaced' : 'Template "' + name + '" saved') : 'Template not saved: ' + x.error);
+    if (!x.ok) return;
+    const list = (S.server.templates || []).filter((t) => s_(t.name).toLowerCase() !== name.toLowerCase());   // shown at once, even if a sync is already running
+    S.server.templates = list.concat([Object.assign({ tid: x.tid, name }, values)]);
+    await saveState(); if (cur().name === 'form' || cur().name === 'buttons') render();
+  })
+    .catch((e) => toast('Template not saved: ' + e.message));
+}
 function saveTemplate(r) {
   const nm = el('input', { type: 'text', id: 'tpl-name', maxlength: '60', value: s_(r.final_diagnoses).split('\n')[0].slice(0, 60) });
   modal('Save as a template', el('div', null, el('p', { class: 'small muted' }, 'Keeps the clinical sections only, never the patient\u2019s details. A template with the same name is replaced.'), el('label', { class: 'lab', for: 'tpl-name' }, 'Template name'), nm),
     [['Cancel', null], ['Save', () => {
       if (!navigator.onLine) { toast('Saving a template needs a signal.'); return false; }
       const values = {}; SECTIONS.forEach((k) => { values[k] = s_(r[k]); });
-      api({ op: 'template_save', token: S.cfg.token, name: s_(nm.value), values, by: S.cfg.name }).then((x) => { toast(x.ok ? (x.replaced ? 'Template replaced' : 'Template saved') : x.error); if (x.ok) sync(); });
+      sendTemplate(s_(nm.value), values);
     }, 'primary']]);
 }
 
@@ -612,12 +635,21 @@ function inviteDialog() {
 }
 function buttonsScreen() {
   const qs = (S.server && S.server.quick) || [], drafts = qs.filter((q) => q.draft);
-  return el('div', { class: 'page' }, topBar('Quick buttons'), el('main', null,
+  return el('div', { class: 'page' }, topBar('Buttons and templates'), el('main', null,
     el('div', { class: 'card' }, el('p', null, qs.length + ' buttons, ' + drafts.length + ' draft. Drafts show with a dashed border, and only on your phone, until approved. Edit their wording in the QUICK tab of the workbook.'),
       drafts.length ? el('button', { class: 'btn primary block', type: 'button', id: 'approve-all', onclick: () => modal('Approve ' + drafts.length + ' draft buttons?', el('p', null, 'They appear on every phone after the next sync.'), [['Cancel', null], ['Approve all', async () => {
         const r = await api({ op: 'quick_approve', token: S.cfg.token }).catch((e) => ({ ok: false, error: e.message }));
         toast(r.ok ? r.n + ' approved' : r.error); if (r.ok) sync();
       }, 'primary']]) }, 'Approve all ' + drafts.length + ' drafts') : null),
+    el('section', { class: 'card', id: 'tpl-list' }, el('h2', null, 'Templates (' + ((S.server && S.server.templates) || []).length + ')'),
+      el('p', { class: 'small muted' }, 'Default fills every new summary. Tap another to delete it. Edit wording in the TEMPLATES tab; consultants add new ones from any summary or when finalising.'),
+      el('div', { class: 'chips' }, ((S.server && S.server.templates) || []).map((t) => el('button', { class: 'chip tpl', type: 'button', onclick: () => {
+        if (s_(t.name).toLowerCase() === 'default') { toast('Edit the Default in the TEMPLATES tab of the workbook'); return; }
+        modal('Delete the template "' + t.name + '"?', el('p', null, 'Summaries already written are not changed.'), [['Cancel', null], ['Delete', async () => {
+          const r = await api({ op: 'template_delete', token: S.cfg.token, tid: t.tid }).catch((e) => ({ ok: false, error: e.message }));
+          if (r.ok) { S.server.templates = S.server.templates.filter((x) => x.tid !== t.tid); await saveState(); render(); } else toast(r.error);
+        }, 'danger']]);
+      } }, t.name)))),
     SECTIONS.map((k) => el('section', { class: 'card' }, el('h2', null, colDef(k).label + ' (' + quickFor(k).length + ')'),
       el('div', { class: 'chips' }, quickFor(k).map((q) => el('button', { class: 'chip q' + (q.draft ? ' draft' : ''), type: 'button', onclick: () => modal('Delete this button?', el('p', null, q.phrase), [['Cancel', null], ['Delete', async () => {
         const r = await api({ op: 'quick_delete', token: S.cfg.token, qid: q.qid }).catch((e) => ({ ok: false, error: e.message }));
