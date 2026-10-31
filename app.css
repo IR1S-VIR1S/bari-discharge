@@ -55,6 +55,9 @@ main { padding: 12px; max-width: 720px; margin: 0 auto; }
 .lab { display: block; font-weight: 600; font-size: 14px; margin: 8px 0 4px; }
 .hint { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.row3 .field { margin: 0; }
+#c-gest_weeks .chip, #c-gravida .chip, #c-para .chip { min-width: 46px; text-align: center; }
 .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
 .chip { border: 1px solid var(--line); background: var(--chip); color: var(--chip-ink); border-radius: 999px; padding: 6px 10px; font-size: 14px; line-height: 1.25; }
 .chip.on { background: var(--chip-on); color: var(--chip-on-ink); border-color: transparent; font-weight: 600; }

@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- *  BARI CLINIC & HOSPITAL: DISCHARGE SUMMARY SYSTEM v1.0
+ *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.1
  *  31 October 2026. One file: paste into the spreadsheet's Apps Script editor.
  * ============================================================================
  *  Keeps one row per discharge in the tab DISCHARGES, with the same headings as the
@@ -30,8 +30,8 @@
  */
 
 const CFG = {
-  VERSION: '1.0',
-  SCHEMA_VER: 1,
+  VERSION: '1.1',
+  SCHEMA_VER: 2,                      // 2: obstetric layout (G/P, weeks, co-morbid, operation date, Hb/TLC/PLT)
   TZ: 'Asia/Karachi',
   MENU: 'Bari Discharge',
   DS_PREFIX: 'BH-',
@@ -44,28 +44,40 @@ const SEX = [['M', 'Male'], ['F', 'Female']];
 const MARITAL = [['S', 'Single'], ['M', 'Married'], ['W', 'Widowed'], ['D', 'Divorced']];
 const RELIGION = [['I', 'Islam'], ['C', 'Christianity']];
 const STATUS = [['D', 'Draft'], ['F', 'Final']];
+function nums_(a, b, pre) { const o = []; for (let i = a; i <= b; i++) o.push([String(i), (pre || '') + i]); return o; }
+const GRAVIDA = nums_(1, 10, 'G');
+const PARA = nums_(0, 9, 'P');
+const WEEKS = nums_(24, 42, '');
+const COMORBID = [['D', 'Diabetes'], ['H', 'Hypertension']];   // ticking one shows its quick buttons
 
 function col(key, label, type, o) { const c = { key: key, label: label, type: type }; if (o) Object.keys(o).forEach(function (k) { c[k] = o[k]; }); return c; }
 
 // Front of the pad, then the back. "sec" columns are the long sections with quick buttons.
-const SCHEMA = [{ tab: 'DISCHARGES', title: 'Discharge summaries', cols: [
+const SCHEMA = [{ tab: 'DISCHARGES', title: 'Obstetric discharge summaries', cols: [
   col('ds_no', 'Discharge number', 'sys'),
   col('uid', 'Record id (made by the phone)', 'sys'),
   col('status', 'Status', 'code', { codes: STATUS }),
   col('date', 'Date', 'date'),
   col('name', 'Name', 'text'),
-  col('father_husband', 'Father’s / Husband’s name', 'text'),
+  col('father_husband', 'Husband\u2019s / Father\u2019s name', 'text'),
   col('age', 'Age', 'age'),
   col('sex', 'Sex', 'code', { codes: SEX }),
   col('marital', 'Marital status', 'code', { codes: MARITAL }),
   col('religion', 'Religion', 'code', { codes: RELIGION }),
+  col('gravida', 'Gravida', 'code', { codes: GRAVIDA }),
+  col('para', 'Para', 'code', { codes: PARA }),
+  col('gest_weeks', 'Weeks of gestation', 'code', { codes: WEEKS }),
+  col('comorbid', 'Co-morbid', 'multi', { codes: COMORBID }),
   col('admit_date', 'Date of admission', 'date'),
+  col('op_date', 'Date of operation', 'date'),
   col('discharge_date', 'Date of discharge', 'date'),
   col('consultant', 'Consultant', 'text'),
   col('final_diagnoses', 'Final diagnoses', 'sec'),
   col('history', 'History', 'sec'),
   col('physical_findings', 'Physical findings', 'sec'),
-  col('investigations', 'Investigations', 'sec'),
+  col('hb', 'Hb', 'num', { min: 3, max: 20, unit: 'g/dL' }),
+  col('tlc', 'TLC', 'num', { min: 1, max: 50, unit: 'x10^9/L' }),
+  col('plt', 'Platelets', 'num', { min: 10, max: 1000, unit: 'x10^9/L' }),
   col('course', 'Course & treatment in the hospital', 'sec'),
   col('discharge_meds', 'Discharge medications', 'sec'),
   col('follow_up', 'Follow up instructions', 'sec'),
@@ -80,9 +92,10 @@ const SCHEMA = [{ tab: 'DISCHARGES', title: 'Discharge summaries', cols: [
 const DCOLS = SCHEMA[0].cols;
 const SECTIONS = DCOLS.filter(function (c) { return c.type === 'sec'; }).map(function (c) { return c.key; });
 const EDITABLE = DCOLS.filter(function (c) { return c.type !== 'sys'; }).map(function (c) { return c.key; });
-const FINAL_NEEDS = ['date', 'name', 'age', 'sex', 'admit_date', 'discharge_date', 'consultant', 'final_diagnoses', 'course', 'discharge_meds'];
+const FINAL_NEEDS = ['date', 'name', 'age', 'gravida', 'para', 'gest_weeks', 'admit_date', 'op_date', 'discharge_date', 'consultant', 'final_diagnoses', 'course', 'discharge_meds'];
 
-const QUICK_COLS = ['qid', 'section', 'group', 'join', 'phrase', 'status', 'added_by', 'added_on'];
+const QUICK_COLS = ['qid', 'section', 'group', 'join', 'phrase', 'status', 'added_by', 'added_on', 'needs'];
+const SEED_VER = '2';                // bump when the starter buttons change: setup swaps the old starter rows for the new ones
 const JOINS = [['N', 'new line'], ['S', 'same line'], ['C', 'same line, after a comma']];
 const TEMPLATE_COLS = ['tid', 'name'].concat(SECTIONS).concat(['saved_by', 'saved_on']);
 const STAFF_COLS = ['name', 'role', 'specialty', 'qualifications', 'phone'];
@@ -106,14 +119,27 @@ function validateValue_(c, v, row) {
   const s = str_(v);
   if (s === '') return '';
   if (s.length > (c.type === 'sec' ? CFG.TEXT_MAX : 200)) return c.label + ' is too long';
-  if (c.type === 'code') return c.codes.some(function (p) { return p[0] === code_(s); }) ? '' : c.label + ': choose one of the buttons';
+  if (c.type === 'code') {
+    if (!c.codes.some(function (p) { return p[0] === code_(s); })) return c.label + ': choose one of the buttons';
+    if (row && (c.key === 'gravida' || c.key === 'para') && str_(row.gravida) !== '' && str_(row.para) !== '' && +row.para > +row.gravida) return 'Para cannot be more than gravida';
+    return '';
+  }
+  if (c.type === 'multi') return s.split(',').every(function (x) { return c.codes.some(function (p) { return p[0] === code_(x); }); }) ? '' : c.label + ': choose from the boxes';
+  if (c.type === 'num') {
+    const x = Number(s);
+    if (!/^\d+(\.\d+)?$/.test(s) || !isFinite(x)) return c.label + ': a number';
+    return x < c.min || x > c.max ? c.label + ': between ' + c.min + ' and ' + c.max + ' ' + c.unit : '';
+  }
   if (c.type === 'date') {
     const d = dayNo_(s);
     if (d === null) return c.label + ': not a valid date';
     if (d < dayNo_('2000-01-01') || d > dayNo_('2100-12-31')) return c.label + ': year out of range';
     if (row) {
       const a = dayNo_(row.admit_date), b = dayNo_(row.discharge_date);
+      const o = dayNo_(row.op_date);
       if ((c.key === 'admit_date' || c.key === 'discharge_date') && a !== null && b !== null && b < a) return 'Date of discharge is before the date of admission';
+      if ((c.key === 'op_date' || c.key === 'admit_date') && o !== null && a !== null && o < a) return 'Date of operation is before the date of admission';
+      if ((c.key === 'op_date' || c.key === 'discharge_date') && o !== null && b !== null && o > b) return 'Date of operation is after the date of discharge';
     }
     return '';
   }
@@ -121,6 +147,15 @@ function validateValue_(c, v, row) {
   return '';
 }
 // what is still missing before a summary can be finalised, as labels
+function comorbidOf_(row) { return str_(row.comorbid) ? code_(row.comorbid).split(',') : []; }
+function quickShown_(q, row) { return !q.needs || comorbidOf_(row).indexOf(code_(q.needs)) >= 0; }
+function gpLine_(row) {
+  const g = str_(row.gravida), p = str_(row.para), w = str_(row.gest_weeks);
+  return (g || p ? 'G' + (g || '?') + ' P' + (p || '?') : '') + (w ? (g || p ? ' at ' : '') + w + ' weeks of gestation' : '');
+}
+function labsLine_(row) {
+  return ['hb', 'tlc', 'plt'].filter(function (k) { return str_(row[k]) !== ''; }).map(function (k) { const c = colOf_(k); return c.label + ' ' + str_(row[k]) + ' ' + c.unit; }).join('   |   ');
+}
 function finalGaps_(row) { return FINAL_NEEDS.filter(function (k) { return str_(row[k]) === ''; }).map(function (k) { return colOf_(k).label; }); }
 function rowProblems_(row) {
   const out = [];
@@ -182,20 +217,15 @@ function setup() {
   const bad = checkHeaders_(ss);
   if (bad) { ui.alert('Stopped', bad + '\n\nNothing was changed.', ui.ButtonSet.OK); return; }
   buildAll_(ss);
-  if (!P.getProperty('SCHEMA_VER')) P.setProperty('SCHEMA_VER', String(CFG.SCHEMA_VER));
+  P.setProperty('SCHEMA_VER', String(CFG.SCHEMA_VER));
   P.setProperty('VERSION', CFG.VERSION);
   ui.alert('Set up complete', 'Tabs are ready. ' + seedNote_(ss) + '\n\nNext: Deploy > New deployment > Web app (Execute as: Me, Who has access: Anyone), then ' + CFG.MENU + ' > PI: manage users, then PI: invite a phone (invite yourself first).', ui.ButtonSet.OK);
 }
+// Only the records tab is guarded: a new layout is applied to it only while it holds no records. Support tabs are moved by column name.
 function checkHeaders_(ss) {
-  const want = { DISCHARGES: DCOLS.map(function (c) { return c.key; }), QUICK: QUICK_COLS, TEMPLATES: TEMPLATE_COLS, STAFF: STAFF_COLS };
-  const out = [];
-  Object.keys(want).forEach(function (n) {
-    const sh = ss.getSheetByName(n);
-    if (!sh || sh.getLastRow() < 1) return;
-    const have = sh.getRange(1, 1, 1, want[n].length).getValues()[0].map(cellTxt_);
-    if (have.join('|') !== want[n].join('|')) out.push('The tab ' + n + ' has different column headings from this script.');
-  });
-  return out.join('\n');
+  const sh = ss.getSheetByName('DISCHARGES'), cols = DCOLS.map(function (c) { return c.key; });
+  if (!sh || headerOk_(sh, cols)) return '';
+  return sh.getLastRow() > 1 ? 'The tab DISCHARGES already holds records in an older layout. Ask Claude for the upgrade before running setup.' : '';
 }
 function sheet_(ss, name, cols, opts) {
   let sh = ss.getSheetByName(name);
@@ -209,13 +239,16 @@ function sheet_(ss, name, cols, opts) {
   return sh;
 }
 function buildAll_(ss) {
-  const d = sheet_(ss, 'DISCHARGES', DCOLS.map(function (c) { return c.key; }), { wide: SECTIONS });
+  const dk = DCOLS.map(function (c) { return c.key; }), d0 = ss.getSheetByName('DISCHARGES');
+  if (d0 && !headerOk_(d0, dk) && d0.getLastRow() <= 1) rewriteTab_(d0, dk);           // empty records tab: take the new layout
+  ['QUICK', 'TEMPLATES', 'STAFF'].forEach(function (n) { const sh = ss.getSheetByName(n), c = { QUICK: QUICK_COLS, TEMPLATES: TEMPLATE_COLS, STAFF: STAFF_COLS }[n]; if (sh && !headerOk_(sh, c)) rewriteTab_(sh, c); });
+  const d = sheet_(ss, 'DISCHARGES', dk, { wide: SECTIONS });
   d.getRange(1, 1, 1, DCOLS.length).setNotes([DCOLS.map(function (c) { return c.label + (c.codes ? '\n' + c.codes.map(function (p) { return p[0] + ' = ' + p[1]; }).join('\n') : ''); })]);
   const q = sheet_(ss, 'QUICK', QUICK_COLS, { wide: ['phrase'] });
-  if (q.getLastRow() < 2) seedQuick_(q);
+  seedQuick_(q);
   q.getRange(1, 1, 1, QUICK_COLS.length).setNotes([['Made by the system', 'Which section the button belongs to: ' + SECTIONS.join(', '), 'A heading that groups buttons inside a section',
-    'N = new line, S = same line, C = same line after a comma', 'The text the button inserts. ___ marks a blank the doctor fills in', 'draft = PI phone only until approved; live = everyone', '', '']]);
-  sheet_(ss, 'TEMPLATES', TEMPLATE_COLS, { wide: SECTIONS });
+    'N = new line, S = same line, C = same line after a comma', 'The text the button inserts. ___ marks a blank the doctor fills in', 'draft = PI phone only until approved; live = everyone', '', '', 'D or H: shown only when the Diabetes or Hypertension box is ticked']]);
+  seedDefault_(sheet_(ss, 'TEMPLATES', TEMPLATE_COLS, { wide: SECTIONS }));
   const st = sheet_(ss, 'STAFF', STAFF_COLS);
   if (st.getLastRow() < 2) st.getRange(2, 1, SEED_STAFF.length, STAFF_COLS.length).setValues(SEED_STAFF);
   st.getRange(1, 1, 1, STAFF_COLS.length).setNotes([['Name as printed', 'consultant or mo', 'Printed under the name, e.g. Gynaecologist & Obstetrician', 'Degrees, e.g. MBBS, FCPS', 'Personal number printed on that consultant\u2019s summaries']]);
@@ -227,131 +260,151 @@ function buildAll_(ss) {
 }
 function seedNote_(ss) {
   const n = ss.getSheetByName('QUICK').getLastRow() - 1;
-  return n + ' quick buttons are in the QUICK tab as DRAFTS: only your phone shows them until you approve them (menu: PI: approve all draft quick buttons).';
+  return n + ' quick buttons are in the QUICK tab (new ones as DRAFTS: only your phone shows them until you approve them: menu PI: approve all draft quick buttons). The Default row in TEMPLATES fills every new summary.';
 }
 
-// Starter quick buttons, written as drafts for the PI to review. [section, group, join, phrase]
+// Starter quick buttons for obstetric (mostly caesarean) discharges, written as drafts for the PI to review.
+// [section, group, join, phrase, needs]; needs D or H: shown only when that co-morbid box is ticked.
 const SEED_QUICK = [
-  ['final_diagnoses', 'Diabetes', 'N', 'Type 2 diabetes mellitus, uncontrolled'], ['final_diagnoses', 'Diabetes', 'N', 'Type 1 diabetes mellitus'],
-  ['final_diagnoses', 'Diabetes', 'N', 'Diabetic ketoacidosis'], ['final_diagnoses', 'Diabetes', 'N', 'Hyperosmolar hyperglycaemic state'],
-  ['final_diagnoses', 'Diabetes', 'N', 'Hypoglycaemia'], ['final_diagnoses', 'Diabetes', 'N', 'Diabetic foot infection'],
-  ['final_diagnoses', 'Medicine', 'N', 'Hypertension'], ['final_diagnoses', 'Medicine', 'N', 'Urinary tract infection'],
-  ['final_diagnoses', 'Medicine', 'N', 'Acute gastroenteritis'], ['final_diagnoses', 'Medicine', 'N', 'Community-acquired pneumonia'],
-  ['final_diagnoses', 'Medicine', 'N', 'Dengue fever'], ['final_diagnoses', 'Medicine', 'N', 'Enteric fever'],
-  ['final_diagnoses', 'Medicine', 'N', 'Anaemia'], ['final_diagnoses', 'Medicine', 'N', 'Chronic kidney disease'],
-  ['final_diagnoses', 'Medicine', 'N', 'Ischaemic heart disease'], ['final_diagnoses', 'Medicine', 'N', 'Hypothyroidism'],
-  ['final_diagnoses', 'Obstetrics', 'N', 'G___ P___ at ___ weeks of gestation'], ['final_diagnoses', 'Obstetrics', 'N', 'Gestational diabetes mellitus'],
-  ['final_diagnoses', 'Obstetrics', 'N', 'Pre-existing diabetes in pregnancy'], ['final_diagnoses', 'Obstetrics', 'N', 'Pre-eclampsia'],
-  ['final_diagnoses', 'Obstetrics', 'N', 'Pregnancy-induced hypertension'], ['final_diagnoses', 'Obstetrics', 'N', 'Term pregnancy, delivered by spontaneous vaginal delivery'],
-  ['final_diagnoses', 'Obstetrics', 'N', 'Term pregnancy, delivered by lower segment caesarean section'], ['final_diagnoses', 'Obstetrics', 'N', 'Previous caesarean section'],
-  ['final_diagnoses', 'Obstetrics', 'N', 'Preterm labour'], ['final_diagnoses', 'Obstetrics', 'N', 'Hyperemesis gravidarum'],
-  ['final_diagnoses', 'Obstetrics', 'N', 'Incomplete miscarriage'], ['final_diagnoses', 'Obstetrics', 'N', 'Ectopic pregnancy'],
-  ['final_diagnoses', 'Obstetrics', 'N', 'Postpartum haemorrhage'],
-  ['history', 'Start', 'N', 'Presented with'], ['history', 'Start', 'N', 'Known case of ___ for ___ years'], ['history', 'Start', 'N', 'Booked patient'],
-  ['history', 'Start', 'N', 'Unbooked patient'], ['history', 'Start', 'N', 'No known drug allergies'], ['history', 'Start', 'N', 'On insulin'],
-  ['history', 'Start', 'N', 'On oral hypoglycaemic agents'],
-  ['history', 'Complaints', 'C', 'fever'], ['history', 'Complaints', 'C', 'vomiting'], ['history', 'Complaints', 'C', 'abdominal pain'],
-  ['history', 'Complaints', 'C', 'loose stools'], ['history', 'Complaints', 'C', 'shortness of breath'], ['history', 'Complaints', 'C', 'cough'],
-  ['history', 'Complaints', 'C', 'burning micturition'], ['history', 'Complaints', 'C', 'polyuria and polydipsia'], ['history', 'Complaints', 'C', 'generalised weakness'],
-  ['history', 'Complaints', 'C', 'altered consciousness'], ['history', 'Complaints', 'C', 'headache'], ['history', 'Complaints', 'C', 'swelling of feet'],
-  ['history', 'Complaints', 'C', 'foot ulcer'], ['history', 'Complaints', 'C', 'labour pains'], ['history', 'Complaints', 'C', 'leaking per vaginum'],
-  ['history', 'Complaints', 'C', 'bleeding per vaginum'], ['history', 'Complaints', 'C', 'decreased fetal movements'],
-  ['history', 'Duration', 'S', 'for ___ days'], ['history', 'Duration', 'S', 'for ___ weeks'], ['history', 'Duration', 'S', 'since ___ hours'],
-  ['physical_findings', 'Vitals', 'N', 'BP ___/___ mmHg'], ['physical_findings', 'Vitals', 'N', 'Pulse ___/min'], ['physical_findings', 'Vitals', 'N', 'Temperature ___ °F'],
-  ['physical_findings', 'Vitals', 'N', 'Respiratory rate ___/min'], ['physical_findings', 'Vitals', 'N', 'SpO2 ___% on room air'], ['physical_findings', 'Vitals', 'N', 'RBS ___ mg/dL'],
-  ['physical_findings', 'Vitals', 'N', 'Weight ___ kg'], ['physical_findings', 'Vitals', 'N', 'GCS ___/15'],
-  ['physical_findings', 'General', 'N', 'Conscious and oriented'], ['physical_findings', 'General', 'N', 'Afebrile'], ['physical_findings', 'General', 'N', 'Pallor present'],
-  ['physical_findings', 'General', 'N', 'No pallor, jaundice or oedema'], ['physical_findings', 'General', 'N', 'Dehydrated'], ['physical_findings', 'General', 'N', 'Pedal oedema present'],
-  ['physical_findings', 'Systems', 'N', 'Chest clear, bilateral vesicular breathing'], ['physical_findings', 'Systems', 'N', 'Crepitations at ___'],
-  ['physical_findings', 'Systems', 'N', 'CVS: S1 and S2 normal, no murmur'], ['physical_findings', 'Systems', 'N', 'Abdomen soft, non-tender'],
-  ['physical_findings', 'Obstetric', 'N', 'Fundal height ___ weeks'], ['physical_findings', 'Obstetric', 'N', 'Cephalic presentation'], ['physical_findings', 'Obstetric', 'N', 'Fetal heart rate ___/min'],
-  ['physical_findings', 'Obstetric', 'N', 'Os ___ cm dilated'], ['physical_findings', 'Obstetric', 'N', 'Uterus well contracted'], ['physical_findings', 'Obstetric', 'N', 'Lochia normal'],
-  ['physical_findings', 'Obstetric', 'N', 'Wound healthy'],
-  ['investigations', 'Blood', 'N', 'Hb ___ g/dL'], ['investigations', 'Blood', 'N', 'TLC ___ x10^9/L'], ['investigations', 'Blood', 'N', 'Platelets ___ x10^9/L'],
-  ['investigations', 'Blood', 'N', 'RBS ___ mg/dL'], ['investigations', 'Blood', 'N', 'HbA1c ___%'], ['investigations', 'Blood', 'N', 'Urea ___ mg/dL'],
-  ['investigations', 'Blood', 'N', 'Creatinine ___ mg/dL'], ['investigations', 'Blood', 'N', 'Na ___ mmol/L, K ___ mmol/L'], ['investigations', 'Blood', 'N', 'ABGs: pH ___, HCO3 ___ mmol/L'],
-  ['investigations', 'Blood', 'N', 'ALT ___ U/L'], ['investigations', 'Blood', 'N', 'Bilirubin ___ mg/dL'], ['investigations', 'Blood', 'N', 'CRP ___ mg/L'],
-  ['investigations', 'Blood', 'N', 'Blood group ___'], ['investigations', 'Blood', 'N', 'Blood culture: ___'],
-  ['investigations', 'Urine', 'N', 'Urine ketones ___'], ['investigations', 'Urine', 'N', 'Urine R/E: pus cells ___/HPF'],
-  ['investigations', 'Imaging', 'N', 'Chest X-ray: ___'], ['investigations', 'Imaging', 'N', 'ECG: ___'], ['investigations', 'Imaging', 'N', 'Ultrasound abdomen and pelvis: ___'],
-  ['investigations', 'Imaging', 'N', 'Obstetric ultrasound: ___'],
-  ['course', 'Medicine', 'N', 'Admitted and managed conservatively'], ['course', 'Medicine', 'N', 'IV fluids given'], ['course', 'Medicine', 'N', 'IV antibiotics given'],
-  ['course', 'Medicine', 'N', 'IV insulin infusion given as per DKA protocol'], ['course', 'Medicine', 'N', 'Shifted to subcutaneous insulin'],
-  ['course', 'Medicine', 'N', 'Blood sugars monitored and insulin adjusted'], ['course', 'Medicine', 'N', 'Electrolytes corrected'],
-  ['course', 'Medicine', 'N', 'Blood transfusion: ___ unit(s) given'], ['course', 'Medicine', 'N', 'Diabetes education given'],
-  ['course', 'Obstetrics', 'N', 'Spontaneous vaginal delivery conducted on ___'], ['course', 'Obstetrics', 'N', 'Lower segment caesarean section performed on ___ under spinal anaesthesia'],
-  ['course', 'Obstetrics', 'N', 'Baby: ___, weight ___ kg, Apgar ___'], ['course', 'Obstetrics', 'N', 'Wound care done'],
-  ['course', 'Outcome', 'N', 'Patient improved and discharged in stable condition'], ['course', 'Outcome', 'N', 'Discharged on request'], ['course', 'Outcome', 'N', 'Left against medical advice'],
-  ['discharge_meds', 'Diabetes', 'N', 'Tab. Metformin 500 mg'],
-  ['discharge_meds', 'Diabetes', 'N', 'Tab. Metformin 1 g'],
-  ['discharge_meds', 'Diabetes', 'N', 'Tab. Glimepiride 2 mg'],
-  ['discharge_meds', 'Diabetes', 'N', 'Tab. Sitagliptin 50 mg'],
-  ['discharge_meds', 'Diabetes', 'N', 'Tab. Empagliflozin 10 mg'],
-  ['discharge_meds', 'Diabetes', 'N', 'Inj. Insulin glargine ___ units'],
-  ['discharge_meds', 'Diabetes', 'N', 'Inj. Regular insulin ___ units'],
-  ['discharge_meds', 'Diabetes', 'N', 'Inj. Insulin 70/30 ___ units'],
-  ['discharge_meds', 'Blood pressure and heart', 'N', 'Tab. Amlodipine 5 mg'],
-  ['discharge_meds', 'Blood pressure and heart', 'N', 'Tab. Losartan 50 mg'],
-  ['discharge_meds', 'Blood pressure and heart', 'N', 'Tab. Methyldopa 250 mg'],
-  ['discharge_meds', 'Blood pressure and heart', 'N', 'Tab. Atorvastatin 20 mg'],
-  ['discharge_meds', 'Blood pressure and heart', 'N', 'Tab. Aspirin 75 mg'],
-  ['discharge_meds', 'Antibiotics', 'N', 'Cap. Cefixime 400 mg'],
-  ['discharge_meds', 'Antibiotics', 'N', 'Inj. Ceftriaxone 1 g'],
-  ['discharge_meds', 'Antibiotics', 'N', 'Inj. Ceftriaxone 2 g'],
-  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Co-amoxiclav 625 mg'],
-  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Metronidazole 400 mg'],
-  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Ciprofloxacin 500 mg'],
-  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Azithromycin 500 mg'],
-  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Nitrofurantoin 100 mg'],
-  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Ferrous sulphate with folic acid'],
-  ['discharge_meds', 'Iron and vitamins', 'N', 'Cap. Ferrous fumarate with folic acid'],
-  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Iron polymaltose 100 mg'],
-  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Folic acid 5 mg'],
-  ['discharge_meds', 'Iron and vitamins', 'N', 'Inj. Iron sucrose ___ mg in ___ mL normal saline'],
-  ['discharge_meds', 'Iron and vitamins', 'N', 'Inj. Ferric carboxymaltose ___ mg'],
-  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Calcium with vitamin D'],
-  ['discharge_meds', 'Pain', 'N', 'Tab. Paracetamol 500 mg'],
-  ['discharge_meds', 'Pain', 'N', 'Tab. Paracetamol 1 g'],
-  ['discharge_meds', 'Pain', 'N', 'Tab. Ibuprofen 400 mg'],
-  ['discharge_meds', 'Pain', 'N', 'Tab. Mefenamic acid 500 mg'],
-  ['discharge_meds', 'Pain', 'N', 'Tab. Diclofenac 50 mg'],
-  ['discharge_meds', 'Pain', 'N', 'Supp. Diclofenac 100 mg'],
-  ['discharge_meds', 'Pain', 'N', 'Tab. Tramadol 50 mg'],
-  ['discharge_meds', 'Stomach', 'N', 'Cap. Omeprazole 20 mg'],
-  ['discharge_meds', 'Stomach', 'N', 'Cap. Esomeprazole 40 mg'],
-  ['discharge_meds', 'Stomach', 'N', 'Tab. Domperidone 10 mg'],
-  ['discharge_meds', 'Stomach', 'N', 'Tab. Ondansetron 4 mg'],
-  ['discharge_meds', 'How often', 'S', 'once daily'],
-  ['discharge_meds', 'How often', 'S', 'twice daily'],
-  ['discharge_meds', 'How often', 'S', 'three times daily'],
-  ['discharge_meds', 'How often', 'S', 'at night'],
-  ['discharge_meds', 'How often', 'S', 'before breakfast'],
-  ['discharge_meds', 'How often', 'S', 'with meals'],
-  ['discharge_meds', 'How often', 'S', 'when needed'],
-  ['discharge_meds', 'How often', 'S', 'IV once daily'],
-  ['discharge_meds', 'How often', 'S', 'IV twice daily'],
-  ['discharge_meds', 'How often', 'S', 'IM once daily'],
-  ['discharge_meds', 'How often', 'S', 'in the rectum at night'],
-  ['discharge_meds', 'How long', 'S', 'for 3 days'],
-  ['discharge_meds', 'How long', 'S', 'for 5 days'],
-  ['discharge_meds', 'How long', 'S', 'for 7 days'],
-  ['discharge_meds', 'How long', 'S', 'for 2 weeks'],
-  ['discharge_meds', 'How long', 'S', 'for 1 month'],
-  ['discharge_meds', 'How long', 'S', 'for 3 months'],
-  ['discharge_meds', 'How long', 'S', 'to continue'],
-  ['follow_up', 'Visit', 'N', 'Follow up in OPD after 1 week'], ['follow_up', 'Visit', 'N', 'Follow up in OPD after 2 weeks'], ['follow_up', 'Visit', 'N', 'Follow up with reports'],
-  ['follow_up', 'Visit', 'N', 'Postnatal follow up after 6 weeks'], ['follow_up', 'Visit', 'N', 'Stitch removal on ___'], ['follow_up', 'Visit', 'N', 'Wound dressing every ___ days'],
-  ['follow_up', 'Advice', 'N', 'Check blood sugar fasting and 2 hours after meals; bring the record'], ['follow_up', 'Advice', 'N', 'Diabetic diet as advised'],
-  ['follow_up', 'Advice', 'N', 'Plenty of oral fluids'], ['follow_up', 'Advice', 'N', 'Breastfeeding encouraged'],
-  ['follow_up', 'Advice', 'N', 'Come back at once in case of fever, vomiting, drowsiness or symptoms of low sugar']
+  ['final_diagnoses', 'Delivery', 'N', 'Delivered by elective lower segment caesarean section', ''],
+  ['final_diagnoses', 'Delivery', 'N', 'Delivered by emergency lower segment caesarean section', ''],
+  ['final_diagnoses', 'Delivery', 'N', 'Delivered by spontaneous vaginal delivery', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Previous caesarean section', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Previous 2 caesarean sections', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Breech presentation', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Transverse lie', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Failure to progress', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Fetal distress', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Cephalopelvic disproportion', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Failed induction of labour', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Placenta praevia', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Abruptio placentae', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Oligohydramnios', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Post-dates pregnancy', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Twin pregnancy', ''],
+  ['final_diagnoses', 'Indication', 'N', 'Maternal request', ''],
+  ['final_diagnoses', 'Other', 'N', 'Anaemia in pregnancy', ''],
+  ['final_diagnoses', 'Other', 'N', 'Hypothyroidism', ''],
+  ['final_diagnoses', 'Diabetes', 'N', 'Gestational diabetes mellitus', 'D'],
+  ['final_diagnoses', 'Diabetes', 'N', 'Pre-existing diabetes in pregnancy', 'D'],
+  ['final_diagnoses', 'Hypertension', 'N', 'Pregnancy-induced hypertension', 'H'],
+  ['final_diagnoses', 'Hypertension', 'N', 'Pre-eclampsia', 'H'],
+  ['final_diagnoses', 'Hypertension', 'N', 'Chronic hypertension', 'H'],
+  ['history', 'Booking', 'N', 'Booked patient', ''],
+  ['history', 'Booking', 'N', 'Unbooked patient', ''],
+  ['history', 'Booking', 'N', 'Admitted for elective caesarean section', ''],
+  ['history', 'Presented with', 'N', 'Presented with labour pains', ''],
+  ['history', 'Presented with', 'N', 'Presented with leaking per vaginum', ''],
+  ['history', 'Presented with', 'N', 'Presented with bleeding per vaginum', ''],
+  ['history', 'Presented with', 'N', 'Presented with decreased fetal movements', ''],
+  ['history', 'Presented with', 'N', 'Presented with labour pains and leaking per vaginum', ''],
+  ['history', 'Other', 'N', 'No known drug allergies', ''],
+  ['history', 'Diabetes', 'N', 'Known gestational diabetic on insulin', 'D'],
+  ['history', 'Diabetes', 'N', 'Known gestational diabetic on metformin', 'D'],
+  ['history', 'Diabetes', 'N', 'Known gestational diabetic on diet control', 'D'],
+  ['history', 'Hypertension', 'N', 'Known hypertensive on methyldopa', 'H'],
+  ['history', 'Hypertension', 'N', 'Known hypertensive on labetalol', 'H'],
+  ['physical_findings', 'Change from normal', 'N', 'Pallor present', ''],
+  ['physical_findings', 'Change from normal', 'N', 'Pedal oedema present', ''],
+  ['physical_findings', 'Change from normal', 'N', 'Wound soakage present', ''],
+  ['physical_findings', 'Change from normal', 'N', 'Tenderness around the wound', ''],
+  ['physical_findings', 'Change from normal', 'N', 'BP ___/___ mmHg', ''],
+  ['physical_findings', 'Change from normal', 'N', 'Pulse ___/min', ''],
+  ['physical_findings', 'Change from normal', 'N', 'Temperature ___ \u00b0F', ''],
+  ['course', 'Operation', 'N', 'Elective lower segment caesarean section performed', ''],
+  ['course', 'Operation', 'N', 'Emergency lower segment caesarean section performed', ''],
+  ['course', 'Operation', 'N', 'Spontaneous vaginal delivery conducted', ''],
+  ['course', 'Baby', 'N', 'Alive baby boy, weight ___ kg', ''],
+  ['course', 'Baby', 'N', 'Alive baby girl, weight ___ kg', ''],
+  ['course', 'Baby', 'N', 'Alive twins', ''],
+  ['course', 'Baby', 'N', 'Baby shifted to nursery', ''],
+  ['course', 'Treatment', 'N', 'Inj. Metronidazole 500 mg IV three times daily given', ''],
+  ['course', 'Treatment', 'N', 'Blood transfusion: ___ unit(s) given', ''],
+  ['course', 'Treatment', 'N', 'Inj. Iron sucrose ___ mg given', ''],
+  ['course', 'Treatment', 'N', 'Catheter removed after 24 hours', ''],
+  ['course', 'Treatment', 'N', 'Mobilised and tolerating orally', ''],
+  ['course', 'Outcome', 'N', 'Patient improved and discharged in stable condition', ''],
+  ['course', 'Outcome', 'N', 'Discharged on request', ''],
+  ['course', 'Outcome', 'N', 'Left against medical advice', ''],
+  ['course', 'Diabetes', 'N', 'Blood sugar monitored and insulin adjusted', 'D'],
+  ['course', 'Diabetes', 'N', 'Insulin stopped after delivery', 'D'],
+  ['course', 'Hypertension', 'N', 'BP monitored; antihypertensives given', 'H'],
+  ['course', 'Hypertension', 'N', 'Inj. Magnesium sulphate given as per protocol', 'H'],
+  ['discharge_meds', 'Antibiotics', 'N', 'Cap. Cefixime 400 mg once daily', ''],
+  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Co-amoxiclav 625 mg three times daily', ''],
+  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Metronidazole 400 mg three times daily', ''],
+  ['discharge_meds', 'Antibiotics', 'N', 'Inj. Ceftriaxone 1 g IV twice daily', ''],
+  ['discharge_meds', 'Pain', 'N', 'Tab. Paracetamol 500 mg, 2 tablets three times daily', ''],
+  ['discharge_meds', 'Pain', 'N', 'Tab. Mefenamic acid 500 mg three times daily', ''],
+  ['discharge_meds', 'Pain', 'N', 'Tab. Ibuprofen 400 mg three times daily', ''],
+  ['discharge_meds', 'Pain', 'N', 'Tab. Diclofenac 50 mg twice daily', ''],
+  ['discharge_meds', 'Pain', 'N', 'Supp. Diclofenac 100 mg at night', ''],
+  ['discharge_meds', 'Pain', 'N', 'Tab. Tramadol 50 mg twice daily when needed', ''],
+  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Ferrous sulphate with folic acid once daily', ''],
+  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Iron polymaltose 100 mg once daily', ''],
+  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Folic acid 5 mg once daily', ''],
+  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Calcium with vitamin D once daily', ''],
+  ['discharge_meds', 'Stomach', 'N', 'Cap. Omeprazole 20 mg once daily before breakfast', ''],
+  ['discharge_meds', 'Stomach', 'N', 'Tab. Domperidone 10 mg three times daily', ''],
+  ['discharge_meds', 'Diabetes', 'N', 'Tab. Metformin 500 mg twice daily', 'D'],
+  ['discharge_meds', 'Diabetes', 'N', 'Inj. Insulin ___ units ___', 'D'],
+  ['discharge_meds', 'Hypertension', 'N', 'Tab. Methyldopa 250 mg three times daily', 'H'],
+  ['discharge_meds', 'Hypertension', 'N', 'Tab. Labetalol 100 mg twice daily', 'H'],
+  ['discharge_meds', 'Hypertension', 'N', 'Tab. Nifedipine 20 mg twice daily', 'H'],
+  ['discharge_meds', 'How long', 'S', 'for 3 days', ''],
+  ['discharge_meds', 'How long', 'S', 'for 5 days', ''],
+  ['discharge_meds', 'How long', 'S', 'for 7 days', ''],
+  ['discharge_meds', 'How long', 'S', 'for 2 weeks', ''],
+  ['discharge_meds', 'How long', 'S', 'for 6 weeks', ''],
+  ['discharge_meds', 'How long', 'S', 'to continue', ''],
+  ['follow_up', 'Visit', 'N', 'Follow up in OPD after 1 week', ''],
+  ['follow_up', 'Visit', 'N', 'Follow up in OPD after 2 weeks', ''],
+  ['follow_up', 'Visit', 'N', 'Postnatal follow up after 6 weeks', ''],
+  ['follow_up', 'Visit', 'N', 'Stitch removal after 7 days', ''],
+  ['follow_up', 'Visit', 'N', 'Stitch removal after 10 days', ''],
+  ['follow_up', 'Visit', 'N', 'Follow up with reports', ''],
+  ['follow_up', 'Advice', 'N', 'Keep the wound clean and dry', ''],
+  ['follow_up', 'Advice', 'N', 'Breastfeeding encouraged', ''],
+  ['follow_up', 'Advice', 'N', 'Avoid lifting heavy weight for 6 weeks', ''],
+  ['follow_up', 'Advice', 'N', 'Plenty of oral fluids', ''],
+  ['follow_up', 'Advice', 'N', 'Come back at once in case of fever, bleeding, wound discharge or severe pain', ''],
+  ['follow_up', 'Diabetes', 'N', 'Check blood sugar fasting and 2 hours after meals; bring the record', 'D'],
+  ['follow_up', 'Hypertension', 'N', 'Check BP daily and bring the record', 'H']
 ];
+// The Default template fills every new summary; the doctor changes only what differs. Edit it in the TEMPLATES tab.
+const SEED_DEFAULT = { name: 'Default',
+  physical_findings: 'BP 120/80 mmHg\nPulse 80/min\nTemperature 98.6 \u00b0F\nRespiratory rate 18/min\nChest clear\nAbdomen soft, wound healthy\nUterus well contracted\nLochia normal',
+  course: 'Lower segment caesarean section performed\nInj. Ceftriaxone 1 g IV twice daily given\nPatient improved and discharged in stable condition' };
 const SEED_STAFF = [['Dr. Sehrish Irfan', 'consultant', 'Gynaecologist & Obstetrician', 'MBBS, FCPS, MRCOG(UK), MHPE(s)', '0334-3337002'],
   ['Dr. Shahina', 'consultant', '', '', '0300 4235009'],
   ['Dr. Muhammad Irfan Alam', 'consultant', 'Diabetologist & Consultant Physician', 'MBBS, FCPS (Medicine), MHPE(s)', '']];
+// Rewrites a support tab in the current column layout, moving every kept row by column name.
+function rewriteTab_(sh, cols, keep) {
+  const width = Math.max(cols.length, sh.getMaxColumns()), n = sh.getLastRow();
+  const head = n ? sh.getRange(1, 1, 1, width).getValues()[0].map(cellTxt_) : [];
+  const rows = n > 1 ? sh.getRange(2, 1, n - 1, width).getValues().map(function (v) { const o = {}; head.forEach(function (h, i) { if (h) o[h] = cellTxt_(v[i]); }); return o; }) : [];
+  const kept = rows.filter(function (o) { return Object.keys(o).some(function (k) { return o[k] !== ''; }) && (!keep || keep(o)); });
+  if (n) sh.getRange(1, 1, n, width).setValues(Array.apply(null, Array(n)).map(function () { return Array.apply(null, Array(width)).map(function () { return ''; }); }));
+  sh.getRange(1, 1, 1, cols.length).setValues([cols]);
+  if (kept.length) sh.getRange(2, 1, kept.length, cols.length).setValues(kept.map(function (o) { return cols.map(function (k) { return o[k] === undefined ? '' : o[k]; }); }));
+  return rows.length - kept.length;
+}
+function headerOk_(sh, cols) { return sh.getLastRow() < 1 || sh.getRange(1, 1, 1, cols.length).getValues()[0].map(cellTxt_).join('|') === cols.join('|'); }
 function seedQuick_(sh) {
-  const by = 'starter list', on = todayIso_();
-  const rows = SEED_QUICK.map(function (r, i) { return ['q' + (i + 1), r[0], r[1], r[2], r[3], 'draft', by, on]; });
-  sh.getRange(2, 1, rows.length, QUICK_COLS.length).setValues(rows);
+  const P = props_();
+  if (P.getProperty('SEED_VER') === SEED_VER && sh.getLastRow() > 1) return 0;
+  rewriteTab_(sh, QUICK_COLS, function (o) { return o.added_by !== 'starter list'; });       // old starter rows go; buttons people added stay
+  const rows = readRows_(sh, QUICK_COLS), top = rows.reduce(function (m, r) { const x = /^q(\d+)$/.exec(r.qid); return x ? Math.max(m, +x[1]) : m; }, 0);
+  const on = todayIso_(), add = SEED_QUICK.map(function (r, i) { return ['q' + (top + i + 1), r[0], r[1], r[2], r[3], 'draft', 'starter list', on, r[4] || '']; });
+  sh.getRange(sh.getLastRow() + 1, 1, add.length, QUICK_COLS.length).setValues(add);
+  P.setProperty('SEED_VER', SEED_VER);
+  return add.length;
+}
+function seedDefault_(sh) {
+  if (readRows_(sh, TEMPLATE_COLS).some(function (t) { return t.name.toLowerCase() === 'default'; })) return;
+  const t = { tid: 't0', saved_by: 'starter', saved_on: todayIso_() };
+  TEMPLATE_COLS.forEach(function (k) { if (SEED_DEFAULT[k] !== undefined) t[k] = SEED_DEFAULT[k]; });
+  writeRow_(sh, TEMPLATE_COLS, sh.getLastRow() + 1, t);
 }
 
 // ---------------------------------------------------------------- reading and writing tabs
@@ -543,7 +596,7 @@ function appPull_(u) {
     return d === null || today - d <= CFG.PULL_DAYS;
   }).map(function (r) { delete r._row; return r; });
   const quick = quickRows_().filter(function (q) { return q.phrase && SECTIONS.indexOf(q.section) >= 0 && (u.role === 'pi' || q.status.toLowerCase() === 'live'); })
-    .map(function (q) { return { qid: q.qid, section: q.section, group: q.group, join: code_(q.join) || 'N', phrase: q.phrase, draft: q.status.toLowerCase() !== 'live' }; });
+    .map(function (q) { return { qid: q.qid, section: q.section, group: q.group, join: code_(q.join) || 'N', phrase: q.phrase, draft: q.status.toLowerCase() !== 'live', needs: code_(q.needs) }; });
   const templates = readRows_(ss.getSheetByName('TEMPLATES'), TEMPLATE_COLS).filter(function (t) { return t.name; }).map(function (t) { delete t._row; return t; });
   const staff = readRows_(ss.getSheetByName('STAFF'), STAFF_COLS).filter(function (s) { return s.name; }).map(function (s) { return { name: s.name, role: s.role.toLowerCase() === 'mo' ? 'mo' : 'consultant', specialty: s.specialty, qualifications: s.qualifications, phone: s.phone }; });
   return { ok: true, email: u.email, role: u.role, roleName: ROLE_NAMES[u.role], version: CFG.VERSION, schema: CFG.SCHEMA_VER, today: todayIso_(), rows: rows, quick: quick, templates: templates, staff: staff };
@@ -582,7 +635,7 @@ function appPush_(u, changes) {
         });
         if (conflicts.length) { res.status = 'conflict'; res.errors = conflicts.map(function (k) { return colOf_(k).label + ' was changed by ' + (row.updated_by || 'someone else'); }); res.current = row; delete res.current._row; results.push(res); return; }
         const next = JSON.parse(JSON.stringify(row));
-        Object.keys(vals).forEach(function (k) { next[k] = k === 'status' || colOf_(k).type === 'code' ? code_(vals[k]) : String(vals[k]).replace(/\r\n?/g, '\n').trim(); });
+        Object.keys(vals).forEach(function (k) { next[k] = k === 'status' || colOf_(k).type === 'code' || colOf_(k).type === 'multi' ? code_(vals[k]) : String(vals[k]).replace(/\r\n?/g, '\n').trim(); });
         if (before && before.status === 'F' && !roleCan_(u.role, 'finalise')) throw new Error('this summary is final; only a consultant can change it');
         if (next.status === 'F' && (!before || before.status !== 'F') && !roleCan_(u.role, 'finalise')) throw new Error('only a consultant can finalise');
         const probs = rowProblems_(next);
@@ -618,7 +671,7 @@ function quickAdd_(u, req) {
     const dup = rows.filter(function (r) { return r.section === sec && r.phrase.toLowerCase() === phrase.toLowerCase(); })[0];
     if (dup) return { ok: true, qid: dup.qid, already: true };
     const top = rows.reduce(function (m, r) { const x = /^q(\d+)$/.exec(r.qid); return x ? Math.max(m, +x[1]) : m; }, 0);
-    const q = { qid: 'q' + (top + 1), section: sec, group: group, join: join, phrase: phrase, status: roleCan_(u.role, 'quickLive') ? 'live' : 'draft', added_by: str_(req.by).slice(0, 60) || u.email, added_on: todayIso_() };
+    const q = { qid: 'q' + (top + 1), section: sec, group: group, join: join, phrase: phrase, status: roleCan_(u.role, 'quickLive') ? 'live' : 'draft', added_by: str_(req.by).slice(0, 60) || u.email, added_on: todayIso_(), needs: /^[DH]$/.test(code_(req.needs)) ? code_(req.needs) : '' };
     writeRow_(sh, QUICK_COLS, sh.getLastRow() + 1, q);
     logIt_(u.email, 'quick button added', '', sec + ': ' + phrase);
     return { ok: true, qid: q.qid, status: q.status };

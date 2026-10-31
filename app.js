@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.0';
-const BUILD_ID = '3d161ef02ac9';
+const BUILD_ID = '443969021095';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -354,13 +354,17 @@ function listScreen() {
 
 // ------------------------------------------------------------------ the summary form
 function newSummary(from) {
-  const uid = rid(), v = { status: 'D', date: dayIso(0), discharge_date: dayIso(0) };
-  if (from) ['name', 'father_husband', 'age', 'sex', 'marital', 'religion'].forEach((k) => { v[k] = s_(from[k]); });
+  const uid = rid(), v = { status: 'D', date: dayIso(0), discharge_date: dayIso(0), op_date: dayIso(1), sex: 'F', marital: 'M' };
+  if (from) ['name', 'father_husband', 'age', 'sex', 'marital', 'religion', 'gravida', 'para', 'comorbid'].forEach((k) => { v[k] = s_(from[k]); });
+  const def = defaultTemplate();
+  if (def) SECTIONS.forEach((k) => { if (s_(def[k])) v[k] = def[k]; });
   if (role() === 'consultant') v.consultant = S.cfg.name;
   if (role() === 'mo') v.mo_name = S.cfg.name;
   T.newVals = v;
   go('form', { uid, isNew: true });
 }
+function defaultTemplate() { return ((S.server && S.server.templates) || []).filter((t) => s_(t.name).toLowerCase() === 'default')[0] || null; }
+function otherTemplates() { return ((S.server && S.server.templates) || []).filter((t) => s_(t.name).toLowerCase() !== 'default'); }
 function formScreen(p) {
   if (!T.form || T.form.uid !== p.uid) {
     const r = record(p.uid);
@@ -372,20 +376,23 @@ function formScreen(p) {
   if (final && !can('finalise')) { setTimeout(() => { T.nav.pop(); T.nav.push({ name: 'view', p: { uid: p.uid } }); T.form = null; render(); }, 0); return el('div'); }
   const set = (k, val) => { v[k] = val; F.dirty = true; };
   const banner = (() => { const c = pendingOf(p.uid); return c && c.errors ? el('div', { class: 'banner bad' }, c.errors.join('. ')) : null; })();
-  const tmpl = F.isNew && S.server && S.server.templates && S.server.templates.length ? el('div', { class: 'card' }, el('div', { class: 'lab' }, 'Start from a template'),
-    el('div', { class: 'chips' }, S.server.templates.map((t) => el('button', { class: 'chip tpl', type: 'button', onclick: () => applyTemplate(t) }, t.name)))) : null;
+  const tmpl = F.isNew && otherTemplates().length ? el('div', { class: 'card' }, el('div', { class: 'lab' }, 'Start from a template'),
+    el('div', { class: 'chips' }, otherTemplates().map((t) => el('button', { class: 'chip tpl', type: 'button', onclick: () => applyTemplate(t) }, t.name)))) : null;
   return el('div', { class: 'page form' }, topBar(F.isNew ? 'New summary' : (v.ds_no || 'Summary'), { back: true }),
     el('main', null, banner, tmpl,
       el('section', { class: 'card' }, el('h2', null, 'Patient'),
         textField('name', set, { cap: 'words' }), textField('father_husband', set, { cap: 'words' }),
-        el('div', { class: 'row2' }, textField('age', set, { mode: 'text', ph: 'e.g. 45 or 6 months' }), codeField('sex', set)),
+        textField('age', set, { mode: 'numeric', ph: 'years' }),
         codeField('marital', set), codeField('religion', set)),
+      el('section', { class: 'card' }, el('h2', null, 'Obstetric'),
+        codeField('gravida', set), codeField('para', set), codeField('gest_weeks', set), comorbidField(set)),
       el('section', { class: 'card' }, el('h2', null, 'Dates and doctors'),
         dateField('date', set, [['Today', 0]]),
         dateField('admit_date', set, [['Today', 0], ['Yesterday', 1], ['2 days ago', 2], ['3 days ago', 3]]),
+        dateField('op_date', set, [['Today', 0], ['Yesterday', 1], ['2 days ago', 2], ['3 days ago', 3]]),
         dateField('discharge_date', set, [['Today', 0], ['Yesterday', 1]]),
         staffField('consultant', set, 'consultant'), staffField('mo_name', set, 'mo')),
-      SECTIONS.map((k) => sectionField(k, set))),
+      SECTIONS.map((k) => [sectionField(k, set), k === 'physical_findings' ? labsCard(set) : null])),
     el('div', { class: 'actbar' },
       el('button', { class: 'btn', type: 'button', id: 'save-draft', onclick: () => saveForm(true) }, final ? 'Save' : 'Save draft'),
       can('finalise') && !final ? el('button', { class: 'btn primary', type: 'button', id: 'finalise', onclick: finaliseForm }, 'Finalise') : null,
@@ -394,7 +401,7 @@ function formScreen(p) {
 function fieldWrap(k, input, extra) { return el('div', { class: 'field', id: 'w-' + k }, el('label', { class: 'lab', for: 'f-' + k }, colDef(k).label), input, extra || null); }
 function textField(k, set, o) {
   o = o || {};
-  const i = el('input', { type: 'text', id: 'f-' + k, value: s_(T.form.vals[k]), autocapitalize: o.cap || 'sentences', placeholder: o.ph || '', maxlength: '200', autocomplete: 'off' });
+  const i = el('input', { type: 'text', id: 'f-' + k, value: s_(T.form.vals[k]), autocapitalize: o.cap || 'sentences', placeholder: o.ph || '', maxlength: '200', autocomplete: 'off', inputmode: o.mode || null });
   i.addEventListener('input', () => set(k, i.value));
   return fieldWrap(k, i);
 }
@@ -420,13 +427,31 @@ function staffField(k, set, kind) {
   i.addEventListener('input', () => set(k, i.value));
   return fieldWrap(k, i, el('div', { class: 'chips' }, names.map((n) => el('button', { class: 'chip', type: 'button', onclick: () => { i.value = n; set(k, n); } }, n))));
 }
-function quickFor(k) { return ((S.server && S.server.quick) || []).filter((q) => q.section === k); }
+function quickFor(k, row) { return ((S.server && S.server.quick) || []).filter((q) => q.section === k && (!row || quickShown_(q, row))); }
+function comorbidField(set) {
+  const cur = comorbidOf_(T.form.vals);
+  return el('div', { class: 'field', id: 'w-comorbid' }, el('div', { class: 'lab' }, 'Co-morbid'), el('div', { class: 'hint' }, 'Ticking one shows its diagnoses, history, treatment and medicine buttons.'),
+    el('div', { class: 'chips', id: 'c-comorbid' }, COMORBID.map((o) => el('button', { class: 'chip box' + (cur.indexOf(o[0]) >= 0 ? ' on' : ''), type: 'button', role: 'checkbox', 'aria-checked': cur.indexOf(o[0]) >= 0 ? 'true' : 'false', 'data-v': o[0], onclick: () => {
+      const now = comorbidOf_(T.form.vals), i = now.indexOf(o[0]);
+      if (i >= 0) now.splice(i, 1); else now.push(o[0]);
+      set('comorbid', COMORBID.map((c) => c[0]).filter((c) => now.indexOf(c) >= 0).join(','));
+      const y = window.scrollY; render(); window.scrollTo(0, y);
+    } }, (cur.indexOf(o[0]) >= 0 ? '\u2611 ' : '\u2610 ') + o[1]))));
+}
+function labsCard(set) {
+  const f = (k) => {
+    const c = colDef(k), i = el('input', { type: 'text', inputmode: 'decimal', id: 'f-' + k, value: s_(T.form.vals[k]), placeholder: c.unit, autocomplete: 'off', maxlength: '6' });
+    i.addEventListener('input', () => set(k, i.value.trim()));
+    return el('div', { class: 'field', id: 'w-' + k }, el('label', { class: 'lab', for: 'f-' + k }, c.label + ' (' + c.unit + ')'), i);
+  };
+  return el('section', { class: 'card', id: 'w-labs' }, el('h2', null, 'Investigations'), el('div', { class: 'row3' }, f('hb'), f('tlc'), f('plt')));
+}
 function sectionField(k, set) {
   const ta = el('textarea', { id: 'f-' + k, rows: '4', value: s_(T.form.vals[k]) });
   const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.max(96, ta.scrollHeight + 2) + 'px'; };
   ta.addEventListener('input', () => { set(k, ta.value); grow(); });
   setTimeout(grow, 0);
-  const qs = quickFor(k), groups = [];
+  const qs = quickFor(k, T.form.vals), groups = [];
   qs.forEach((q) => { if (groups.indexOf(q.group) < 0) groups.push(q.group); });
   const use = S.usage || {}, top = qs.filter((q) => use[q.qid]).sort((a, b) => use[b.qid] - use[a.qid]).slice(0, 6);
   const chip = (q) => el('button', { class: 'chip q' + (q.draft ? ' draft' : ''), type: 'button', title: q.draft ? 'Draft: only the PI sees it until approved' : '', onclick: () => { insertPhrase(ta, q); set(k, ta.value); grow(); S.usage[q.qid] = (S.usage[q.qid] || 0) + 1; } }, q.phrase);
@@ -517,7 +542,11 @@ function viewScreen(p) {
       c && c.status === 'conflict' ? conflictCard(c) : null,
       c && c.status === 'refused' ? el('div', { class: 'banner bad' }, 'Not accepted by the workbook: ' + (c.errors || []).join('. ') + '. Open Edit to fix it.') : null,
       el('div', { class: 'card' }, el('div', { class: 'vhead' }, el('b', null, r.name), el('span', { class: 'chip-st ' + (final ? 'fin' : 'draft') }, final ? 'final' : 'draft')),
-        ['father_husband', 'age', 'sex', 'marital', 'religion', 'date', 'admit_date', 'discharge_date', 'consultant', 'mo_name'].map(line),
+        ['father_husband', 'age', 'marital', 'religion'].map(line),
+        gpLine_(r) ? el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Obstetric'), el('span', { class: 'v' }, gpLine_(r))) : null,
+        comorbidOf_(r).length ? el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Co-morbid'), el('span', { class: 'v' }, comorbidOf_(r).map((c) => (COMORBID.filter((x) => x[0] === c)[0] || [c, c])[1]).join(', '))) : null,
+        ['date', 'admit_date', 'op_date', 'discharge_date', 'consultant', 'mo_name'].map(line),
+        labsLine_(r) ? el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Investigations'), el('span', { class: 'v' }, labsLine_(r))) : null,
         final ? el('div', { class: 'small muted' }, 'Finalised by ' + r.finalised_by + ' on ' + s_(r.finalised_at)) : null),
       SECTIONS.map((k) => (s_(r[k]) ? el('div', { class: 'card' }, el('h2', null, colDef(k).label), el('div', { class: 'pre' }, r[k])) : null)),
       el('div', { class: 'stack' },
@@ -670,23 +699,32 @@ function buildPdf(r, imgs) {
   // the patient box, as on the pad
   const cell = (x, yy, w, h, label, val) => { rect(x, yy - h, w, h); T_(x + 5, yy - 11, label, 7.5, true); wrap(val, 10.5, w - 10).slice(0, 2).forEach((l, i) => T_(x + 5, yy - 25 - i * 12, l, 10.5, false)); };
   const code = (k) => (s_(r[k]) ? codeLabel_(k, r[k]) : '');
+  const gp = (s_(r.gravida) || s_(r.para)) ? 'G' + (s_(r.gravida) || '?') + ' P' + (s_(r.para) || '?') : '';
   const rows = [
-    [[0.62, 'NAME', r.name], [0.38, 'FATHER\u2019S / HUSBAND\u2019S NAME', r.father_husband]],
-    [[0.16, 'AGE', r.age], [0.16, 'SEX', code('sex')], [0.22, 'MARITAL STATUS', code('marital')], [0.2, 'RELIGION', code('religion')], [0.26, 'DATE', dmy(r.date)]],
-    [[0.25, 'DATE OF ADMISSION', dmy(r.admit_date)], [0.25, 'DATE OF DISCHARGE', dmy(r.discharge_date)], [0.5, 'CONSULTANT', r.consultant]]
+    [[0.58, 'NAME', r.name], [0.42, 'HUSBAND\u2019S / FATHER\u2019S NAME', r.father_husband]],
+    [[0.12, 'AGE', r.age], [0.14, 'GRAVIDA / PARA', gp], [0.16, 'GESTATION', s_(r.gest_weeks) ? r.gest_weeks + ' weeks' : ''], [0.18, 'MARITAL STATUS', code('marital')], [0.18, 'RELIGION', code('religion')], [0.22, 'DATE', dmy(r.date)]],
+    [[0.2, 'DATE OF ADMISSION', dmy(r.admit_date)], [0.2, 'DATE OF OPERATION', dmy(r.op_date)], [0.2, 'DATE OF DISCHARGE', dmy(r.discharge_date)], [0.4, 'CONSULTANT', r.consultant]]
   ];
   rows.forEach((row) => { let x = M; const h = row.some((c) => wrap(c[2] || '', 10.5, c[0] * CW - 10).length > 1) ? 44 : 34; row.forEach((c) => { cell(x, y, c[0] * CW, h, c[1], c[2] || ''); x += c[0] * CW; }); y -= h; });
   y -= 14;
   // the sections, flowing onto more pages when long
+  const blocks = [];
   SECTIONS.forEach((k) => {
-    const lines = wrap(s_(r[k]) || '-', 10.5, CW - 8);
+    const txt = k === 'final_diagnoses' ? [gpLine_(r), s_(r[k])].filter(Boolean).join('\n')
+      : k === 'physical_findings' ? s_(r[k]).split('\n').map((x) => x.trim().replace(/[.,;]+$/, '')).filter(Boolean).join(', ')   // short readings read better as one paragraph and keep the page to one sheet
+      : s_(r[k]);
+    blocks.push([colDef(k).label, txt]);
+    if (k === 'physical_findings') blocks.push(['Investigations', labsLine_(r)]);
+  });
+  blocks.forEach((bk) => {
+    const lines = wrap(bk[1] || '-', 10.5, CW - 8);
     need(34);
-    const head = colDef(k).label.toUpperCase();
+    const head = bk[0].toUpperCase();
     T_(M, y, head, 11, true); lineH(M, y - 2, M + tw(pdfText(head), 11, true)); y -= 16;
     lines.forEach((l) => { need(14); T_(M + 4, y, l, 10.5, false); y -= 13.5; });
     y -= 10;
   });
-  need(100); y -= 30;
+  need(86); y -= 26;
   lineH(PW - M - 200, y, PW - M);
   T_(PW - M - 200, y - 12, 'Signature of Consultant', 9, true);
   if (r.consultant) {                                   // the consultant's details, printed once, here
