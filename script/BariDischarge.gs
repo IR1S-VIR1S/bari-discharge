@@ -1,0 +1,729 @@
+/**
+ * ============================================================================
+ *  BARI CLINIC & HOSPITAL: DISCHARGE SUMMARY SYSTEM v1.0
+ *  31 October 2026. One file: paste into the spreadsheet's Apps Script editor.
+ * ============================================================================
+ *  Keeps one row per discharge in the tab DISCHARGES, with the same headings as the
+ *  printed Discharge Summary pad (front and back). Consultants and medical officers
+ *  fill it in on the Bari Discharge phone app, using quick buttons, and the phone
+ *  makes the A4 summary as a PDF to print or send on WhatsApp.
+ *
+ *  Tabs it builds in this workbook:
+ *    DISCHARGES   the records (one row per discharge)
+ *    QUICK        the quick buttons: edit, add or delete rows here. status "draft" rows are
+ *                 seen only on the PI phone until approved (menu: approve all draft buttons)
+ *    TEMPLATES    whole-summary templates saved from the phone (clinical sections only)
+ *    STAFF        consultant and medical officer names offered as buttons
+ *    LOG          who changed what and when (field names only, not the text)
+ *
+ *  Install:
+ *    1. Create a blank Google Sheet and name it Bari_Discharge.
+ *    2. Extensions > Apps Script. Replace the sample code with this file. Save.
+ *    3. Reload the spreadsheet. Menu: Bari Discharge > PI: set up or repair.
+ *    4. Approve the permissions, then choose the same menu item again.
+ *    5. Deploy > New deployment > Web app; Execute as: Me; Who has access: Anyone.
+ *    6. Bari Discharge > PI: manage users, then PI: invite a phone.
+ *  Running setup again is safe: it repairs missing parts and never deletes data.
+ *  To change the script later: paste the new code into the SAME project, then
+ *  Deploy > Manage deployments > pencil > Version: New version > Deploy. Never "New deployment".
+ * ============================================================================
+ */
+
+const CFG = {
+  VERSION: '1.0',
+  SCHEMA_VER: 1,
+  TZ: 'Asia/Karachi',
+  MENU: 'Bari Discharge',
+  DS_PREFIX: 'BH-',
+  PULL_DAYS: 120,                     // phones keep discharges from the last 120 days, and every draft
+  TEXT_MAX: 6000,
+  HOSPITAL: { name: 'BARI HOSPITAL', address: '73-G, Gulberg III, Near Firdous Market, Lahore', phone: 'Ph: 042 3583 4233', qr: 'https://goo.gl/maps/VroaxLdTjCajWF3f8' }
+};
+
+const SEX = [['M', 'Male'], ['F', 'Female']];
+const MARITAL = [['S', 'Single'], ['M', 'Married'], ['W', 'Widowed'], ['D', 'Divorced']];
+const RELIGION = [['I', 'Islam'], ['C', 'Christianity']];
+const STATUS = [['D', 'Draft'], ['F', 'Final']];
+
+function col(key, label, type, o) { const c = { key: key, label: label, type: type }; if (o) Object.keys(o).forEach(function (k) { c[k] = o[k]; }); return c; }
+
+// Front of the pad, then the back. "sec" columns are the long sections with quick buttons.
+const SCHEMA = [{ tab: 'DISCHARGES', title: 'Discharge summaries', cols: [
+  col('ds_no', 'Discharge number', 'sys'),
+  col('uid', 'Record id (made by the phone)', 'sys'),
+  col('status', 'Status', 'code', { codes: STATUS }),
+  col('date', 'Date', 'date'),
+  col('name', 'Name', 'text'),
+  col('father_husband', 'Father’s / Husband’s name', 'text'),
+  col('age', 'Age', 'age'),
+  col('sex', 'Sex', 'code', { codes: SEX }),
+  col('marital', 'Marital status', 'code', { codes: MARITAL }),
+  col('religion', 'Religion', 'code', { codes: RELIGION }),
+  col('admit_date', 'Date of admission', 'date'),
+  col('discharge_date', 'Date of discharge', 'date'),
+  col('consultant', 'Consultant', 'text'),
+  col('final_diagnoses', 'Final diagnoses', 'sec'),
+  col('history', 'History', 'sec'),
+  col('physical_findings', 'Physical findings', 'sec'),
+  col('investigations', 'Investigations', 'sec'),
+  col('course', 'Course & treatment in the hospital', 'sec'),
+  col('discharge_meds', 'Discharge medications', 'sec'),
+  col('follow_up', 'Follow up instructions', 'sec'),
+  col('mo_name', 'Medical officer', 'text'),
+  col('created_by', 'Created by', 'sys'),
+  col('created_at', 'Created at', 'sys'),
+  col('updated_by', 'Last changed by', 'sys'),
+  col('updated_at', 'Last changed at', 'sys'),
+  col('finalised_by', 'Finalised by', 'sys'),
+  col('finalised_at', 'Finalised at', 'sys')
+] }];
+const DCOLS = SCHEMA[0].cols;
+const SECTIONS = DCOLS.filter(function (c) { return c.type === 'sec'; }).map(function (c) { return c.key; });
+const EDITABLE = DCOLS.filter(function (c) { return c.type !== 'sys'; }).map(function (c) { return c.key; });
+const FINAL_NEEDS = ['date', 'name', 'age', 'sex', 'admit_date', 'discharge_date', 'consultant', 'final_diagnoses', 'course', 'discharge_meds'];
+
+const QUICK_COLS = ['qid', 'section', 'group', 'join', 'phrase', 'status', 'added_by', 'added_on'];
+const JOINS = [['N', 'new line'], ['S', 'same line'], ['C', 'same line, after a comma']];
+const TEMPLATE_COLS = ['tid', 'name'].concat(SECTIONS).concat(['saved_by', 'saved_on']);
+const STAFF_COLS = ['name', 'role', 'specialty', 'qualifications', 'phone'];
+
+// ---------------------------------------------------------------- helpers (shared with the phone)
+function str_(v) { return v === null || v === undefined ? '' : String(v).trim(); }
+function code_(v) { return str_(v).toUpperCase(); }
+function pad2_(n) { return (n < 10 ? '0' : '') + n; }
+function dayNo_(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str_(iso));
+  if (!m) return null;
+  const d = Date.UTC(+m[1], +m[2] - 1, +m[3]), t = new Date(d);
+  if (t.getUTCFullYear() !== +m[1] || t.getUTCMonth() !== +m[2] - 1 || t.getUTCDate() !== +m[3]) return null;
+  return Math.round(d / 864e5);
+}
+function colOf_(key) { return DCOLS.filter(function (c) { return c.key === key; })[0]; }
+function codeLabel_(key, v) { const c = colOf_(key); const p = c && c.codes ? c.codes.filter(function (x) { return x[0] === code_(v); })[0] : null; return p ? p[1] : str_(v); }
+
+// '' when acceptable; a blank is always acceptable here (completeness is checked by finalGaps_)
+function validateValue_(c, v, row) {
+  const s = str_(v);
+  if (s === '') return '';
+  if (s.length > (c.type === 'sec' ? CFG.TEXT_MAX : 200)) return c.label + ' is too long';
+  if (c.type === 'code') return c.codes.some(function (p) { return p[0] === code_(s); }) ? '' : c.label + ': choose one of the buttons';
+  if (c.type === 'date') {
+    const d = dayNo_(s);
+    if (d === null) return c.label + ': not a valid date';
+    if (d < dayNo_('2000-01-01') || d > dayNo_('2100-12-31')) return c.label + ': year out of range';
+    if (row) {
+      const a = dayNo_(row.admit_date), b = dayNo_(row.discharge_date);
+      if ((c.key === 'admit_date' || c.key === 'discharge_date') && a !== null && b !== null && b < a) return 'Date of discharge is before the date of admission';
+    }
+    return '';
+  }
+  if (c.type === 'age') return /^\d{1,3}(\.\d)?( ?(y|yr|yrs|years?|m|mo|months?|d|days?|w|wk|weeks?))?$/i.test(s) && parseFloat(s) <= 120 ? '' : 'Age: a number, optionally followed by years, months, weeks or days';
+  return '';
+}
+// what is still missing before a summary can be finalised, as labels
+function finalGaps_(row) { return FINAL_NEEDS.filter(function (k) { return str_(row[k]) === ''; }).map(function (k) { return colOf_(k).label; }); }
+function rowProblems_(row) {
+  const out = [];
+  DCOLS.forEach(function (c) { if (c.type === 'sys') return; const e = validateValue_(c, row[c.key], row); if (e && out.indexOf(e) < 0) out.push(e); });
+  return out;
+}
+
+// ---------------------------------------------------------------- roles (shared with the phone)
+const ROLE_NAMES = { pi: 'PI', consultant: 'Consultant', mo: 'Medical officer' };
+function roleCan_(role, what) {
+  if (role === 'pi') return true;
+  if (what === 'edit' || what === 'quickAdd') return role === 'consultant' || role === 'mo';
+  if (what === 'finalise' || what === 'template') return role === 'consultant';
+  return false;                        // quickLive, quickApprove, invite: PI only
+}
+const APP_JOIN_DAYS = 7;
+
+// ============================================================================
+//  GOOGLE SERVICES
+// ============================================================================
+function props_() { return PropertiesService.getScriptProperties(); }
+function ss_() { const id = props_().getProperty('DATA_ID'); return id ? SpreadsheetApp.openById(id) : SpreadsheetApp.getActive(); }
+function nowTxt_() { return Utilities.formatDate(new Date(), CFG.TZ, 'yyyy-MM-dd HH:mm'); }
+function todayIso_() { return Utilities.formatDate(new Date(), CFG.TZ, 'yyyy-MM-dd'); }
+function emails_(key) { return (props_().getProperty(key) || '').split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(function (s) { return s !== ''; }); }
+function piEmail_() { return (props_().getProperty('PI_EMAIL') || '').toLowerCase(); }
+function me_() { return (Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail() || '').toLowerCase(); }
+function requirePI_() { const pi = piEmail_(); if (!pi || me_() !== pi) throw new Error('Only the PI (' + (pi || 'not yet set up') + ') can do this.'); }
+function sha256_(s) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, s, Utilities.Charset.UTF_8).map(function (b) { return ('0' + (b & 255).toString(16)).slice(-2); }).join('');
+}
+function randomHex_(n) { let s = ''; while (s.length < n) s += Utilities.getUuid().replace(/-/g, ''); return s.slice(0, n); }
+function cellTxt_(v) {
+  if (Object.prototype.toString.call(v) === '[object Date]') return Utilities.formatDate(v, CFG.TZ, 'yyyy-MM-dd');
+  return v === null || v === undefined ? '' : String(v);
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu(CFG.MENU)
+    .addItem('PI: set up or repair', 'setup')
+    .addItem('PI: manage users', 'menuUsers')
+    .addItem('PI: invite a phone', 'menuInvite')
+    .addItem('PI: revoke a phone', 'menuRevoke')
+    .addSeparator()
+    .addItem('PI: approve all draft quick buttons', 'menuApproveQuick')
+    .addSeparator()
+    .addItem('PI: update the script from GitHub', 'menuUpdateScript')
+    .addItem('How to update without re-inviting', 'menuUpdateHelp')
+    .addToUi();
+}
+
+// ---------------------------------------------------------------- setup
+function setup() {
+  const ui = SpreadsheetApp.getUi(), P = props_(), ss = SpreadsheetApp.getActive();
+  const pi = piEmail_(), me = me_();
+  if (pi && me && pi !== me) { ui.alert('Not allowed', 'This system was set up by ' + pi + '. Only that account can repair it.', ui.ButtonSet.OK); return; }
+  if (!pi) P.setProperty('PI_EMAIL', me);
+  P.setProperty('DATA_ID', ss.getId());
+  const bad = checkHeaders_(ss);
+  if (bad) { ui.alert('Stopped', bad + '\n\nNothing was changed.', ui.ButtonSet.OK); return; }
+  buildAll_(ss);
+  if (!P.getProperty('SCHEMA_VER')) P.setProperty('SCHEMA_VER', String(CFG.SCHEMA_VER));
+  P.setProperty('VERSION', CFG.VERSION);
+  ui.alert('Set up complete', 'Tabs are ready. ' + seedNote_(ss) + '\n\nNext: Deploy > New deployment > Web app (Execute as: Me, Who has access: Anyone), then ' + CFG.MENU + ' > PI: manage users, then PI: invite a phone (invite yourself first).', ui.ButtonSet.OK);
+}
+function checkHeaders_(ss) {
+  const want = { DISCHARGES: DCOLS.map(function (c) { return c.key; }), QUICK: QUICK_COLS, TEMPLATES: TEMPLATE_COLS, STAFF: STAFF_COLS };
+  const out = [];
+  Object.keys(want).forEach(function (n) {
+    const sh = ss.getSheetByName(n);
+    if (!sh || sh.getLastRow() < 1) return;
+    const have = sh.getRange(1, 1, 1, want[n].length).getValues()[0].map(cellTxt_);
+    if (have.join('|') !== want[n].join('|')) out.push('The tab ' + n + ' has different column headings from this script.');
+  });
+  return out.join('\n');
+}
+function sheet_(ss, name, cols, opts) {
+  let sh = ss.getSheetByName(name);
+  if (!sh) sh = ss.insertSheet(name);
+  if (sh.getLastRow() < 1) sh.getRange(1, 1, 1, cols.length).setValues([cols]);
+  if (sh.getMaxColumns() < cols.length) sh.insertColumnsAfter(sh.getMaxColumns(), cols.length - sh.getMaxColumns());
+  sh.getRange(1, 1, 1, cols.length).setFontWeight('bold').setBackground('#0e5e5a').setFontColor('#ffffff');
+  sh.setFrozenRows(1);
+  sh.getRange(1, 1, sh.getMaxRows(), cols.length).setNumberFormat('@');     // text everywhere: dates stay yyyy-mm-dd, leading zeros stay
+  if (opts && opts.wide) opts.wide.forEach(function (k) { const i = cols.indexOf(k); if (i >= 0) sh.setColumnWidth(i + 1, 320); });
+  return sh;
+}
+function buildAll_(ss) {
+  const d = sheet_(ss, 'DISCHARGES', DCOLS.map(function (c) { return c.key; }), { wide: SECTIONS });
+  d.getRange(1, 1, 1, DCOLS.length).setNotes([DCOLS.map(function (c) { return c.label + (c.codes ? '\n' + c.codes.map(function (p) { return p[0] + ' = ' + p[1]; }).join('\n') : ''); })]);
+  const q = sheet_(ss, 'QUICK', QUICK_COLS, { wide: ['phrase'] });
+  if (q.getLastRow() < 2) seedQuick_(q);
+  q.getRange(1, 1, 1, QUICK_COLS.length).setNotes([['Made by the system', 'Which section the button belongs to: ' + SECTIONS.join(', '), 'A heading that groups buttons inside a section',
+    'N = new line, S = same line, C = same line after a comma', 'The text the button inserts. ___ marks a blank the doctor fills in', 'draft = PI phone only until approved; live = everyone', '', '']]);
+  sheet_(ss, 'TEMPLATES', TEMPLATE_COLS, { wide: SECTIONS });
+  const st = sheet_(ss, 'STAFF', STAFF_COLS);
+  if (st.getLastRow() < 2) st.getRange(2, 1, SEED_STAFF.length, STAFF_COLS.length).setValues(SEED_STAFF);
+  st.getRange(1, 1, 1, STAFF_COLS.length).setNotes([['Name as printed', 'consultant or mo', 'Printed under the name, e.g. Gynaecologist & Obstetrician', 'Degrees, e.g. MBBS, FCPS', 'Personal number printed on that consultant\u2019s summaries']]);
+  const lg = sheet_(ss, 'LOG', ['at', 'user', 'action', 'ds_no', 'detail']);
+  try {                                                  // only the PI may edit the system tabs by hand
+    [lg].forEach(function (sh) { const p = sh.protect().setDescription('system'); p.getEditors().forEach(function (u) { if ((u.getEmail() || '').toLowerCase() !== piEmail_()) p.removeEditor(u); }); });
+  } catch (e) { /* protection is a convenience; the phones never depend on it */ }
+  const s1 = ss.getSheetByName('Sheet1'); if (s1 && s1.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(s1);
+}
+function seedNote_(ss) {
+  const n = ss.getSheetByName('QUICK').getLastRow() - 1;
+  return n + ' quick buttons are in the QUICK tab as DRAFTS: only your phone shows them until you approve them (menu: PI: approve all draft quick buttons).';
+}
+
+// Starter quick buttons, written as drafts for the PI to review. [section, group, join, phrase]
+const SEED_QUICK = [
+  ['final_diagnoses', 'Diabetes', 'N', 'Type 2 diabetes mellitus, uncontrolled'], ['final_diagnoses', 'Diabetes', 'N', 'Type 1 diabetes mellitus'],
+  ['final_diagnoses', 'Diabetes', 'N', 'Diabetic ketoacidosis'], ['final_diagnoses', 'Diabetes', 'N', 'Hyperosmolar hyperglycaemic state'],
+  ['final_diagnoses', 'Diabetes', 'N', 'Hypoglycaemia'], ['final_diagnoses', 'Diabetes', 'N', 'Diabetic foot infection'],
+  ['final_diagnoses', 'Medicine', 'N', 'Hypertension'], ['final_diagnoses', 'Medicine', 'N', 'Urinary tract infection'],
+  ['final_diagnoses', 'Medicine', 'N', 'Acute gastroenteritis'], ['final_diagnoses', 'Medicine', 'N', 'Community-acquired pneumonia'],
+  ['final_diagnoses', 'Medicine', 'N', 'Dengue fever'], ['final_diagnoses', 'Medicine', 'N', 'Enteric fever'],
+  ['final_diagnoses', 'Medicine', 'N', 'Anaemia'], ['final_diagnoses', 'Medicine', 'N', 'Chronic kidney disease'],
+  ['final_diagnoses', 'Medicine', 'N', 'Ischaemic heart disease'], ['final_diagnoses', 'Medicine', 'N', 'Hypothyroidism'],
+  ['final_diagnoses', 'Obstetrics', 'N', 'G___ P___ at ___ weeks of gestation'], ['final_diagnoses', 'Obstetrics', 'N', 'Gestational diabetes mellitus'],
+  ['final_diagnoses', 'Obstetrics', 'N', 'Pre-existing diabetes in pregnancy'], ['final_diagnoses', 'Obstetrics', 'N', 'Pre-eclampsia'],
+  ['final_diagnoses', 'Obstetrics', 'N', 'Pregnancy-induced hypertension'], ['final_diagnoses', 'Obstetrics', 'N', 'Term pregnancy, delivered by spontaneous vaginal delivery'],
+  ['final_diagnoses', 'Obstetrics', 'N', 'Term pregnancy, delivered by lower segment caesarean section'], ['final_diagnoses', 'Obstetrics', 'N', 'Previous caesarean section'],
+  ['final_diagnoses', 'Obstetrics', 'N', 'Preterm labour'], ['final_diagnoses', 'Obstetrics', 'N', 'Hyperemesis gravidarum'],
+  ['final_diagnoses', 'Obstetrics', 'N', 'Incomplete miscarriage'], ['final_diagnoses', 'Obstetrics', 'N', 'Ectopic pregnancy'],
+  ['final_diagnoses', 'Obstetrics', 'N', 'Postpartum haemorrhage'],
+  ['history', 'Start', 'N', 'Presented with'], ['history', 'Start', 'N', 'Known case of ___ for ___ years'], ['history', 'Start', 'N', 'Booked patient'],
+  ['history', 'Start', 'N', 'Unbooked patient'], ['history', 'Start', 'N', 'No known drug allergies'], ['history', 'Start', 'N', 'On insulin'],
+  ['history', 'Start', 'N', 'On oral hypoglycaemic agents'],
+  ['history', 'Complaints', 'C', 'fever'], ['history', 'Complaints', 'C', 'vomiting'], ['history', 'Complaints', 'C', 'abdominal pain'],
+  ['history', 'Complaints', 'C', 'loose stools'], ['history', 'Complaints', 'C', 'shortness of breath'], ['history', 'Complaints', 'C', 'cough'],
+  ['history', 'Complaints', 'C', 'burning micturition'], ['history', 'Complaints', 'C', 'polyuria and polydipsia'], ['history', 'Complaints', 'C', 'generalised weakness'],
+  ['history', 'Complaints', 'C', 'altered consciousness'], ['history', 'Complaints', 'C', 'headache'], ['history', 'Complaints', 'C', 'swelling of feet'],
+  ['history', 'Complaints', 'C', 'foot ulcer'], ['history', 'Complaints', 'C', 'labour pains'], ['history', 'Complaints', 'C', 'leaking per vaginum'],
+  ['history', 'Complaints', 'C', 'bleeding per vaginum'], ['history', 'Complaints', 'C', 'decreased fetal movements'],
+  ['history', 'Duration', 'S', 'for ___ days'], ['history', 'Duration', 'S', 'for ___ weeks'], ['history', 'Duration', 'S', 'since ___ hours'],
+  ['physical_findings', 'Vitals', 'N', 'BP ___/___ mmHg'], ['physical_findings', 'Vitals', 'N', 'Pulse ___/min'], ['physical_findings', 'Vitals', 'N', 'Temperature ___ °F'],
+  ['physical_findings', 'Vitals', 'N', 'Respiratory rate ___/min'], ['physical_findings', 'Vitals', 'N', 'SpO2 ___% on room air'], ['physical_findings', 'Vitals', 'N', 'RBS ___ mg/dL'],
+  ['physical_findings', 'Vitals', 'N', 'Weight ___ kg'], ['physical_findings', 'Vitals', 'N', 'GCS ___/15'],
+  ['physical_findings', 'General', 'N', 'Conscious and oriented'], ['physical_findings', 'General', 'N', 'Afebrile'], ['physical_findings', 'General', 'N', 'Pallor present'],
+  ['physical_findings', 'General', 'N', 'No pallor, jaundice or oedema'], ['physical_findings', 'General', 'N', 'Dehydrated'], ['physical_findings', 'General', 'N', 'Pedal oedema present'],
+  ['physical_findings', 'Systems', 'N', 'Chest clear, bilateral vesicular breathing'], ['physical_findings', 'Systems', 'N', 'Crepitations at ___'],
+  ['physical_findings', 'Systems', 'N', 'CVS: S1 and S2 normal, no murmur'], ['physical_findings', 'Systems', 'N', 'Abdomen soft, non-tender'],
+  ['physical_findings', 'Obstetric', 'N', 'Fundal height ___ weeks'], ['physical_findings', 'Obstetric', 'N', 'Cephalic presentation'], ['physical_findings', 'Obstetric', 'N', 'Fetal heart rate ___/min'],
+  ['physical_findings', 'Obstetric', 'N', 'Os ___ cm dilated'], ['physical_findings', 'Obstetric', 'N', 'Uterus well contracted'], ['physical_findings', 'Obstetric', 'N', 'Lochia normal'],
+  ['physical_findings', 'Obstetric', 'N', 'Wound healthy'],
+  ['investigations', 'Blood', 'N', 'Hb ___ g/dL'], ['investigations', 'Blood', 'N', 'TLC ___ x10^9/L'], ['investigations', 'Blood', 'N', 'Platelets ___ x10^9/L'],
+  ['investigations', 'Blood', 'N', 'RBS ___ mg/dL'], ['investigations', 'Blood', 'N', 'HbA1c ___%'], ['investigations', 'Blood', 'N', 'Urea ___ mg/dL'],
+  ['investigations', 'Blood', 'N', 'Creatinine ___ mg/dL'], ['investigations', 'Blood', 'N', 'Na ___ mmol/L, K ___ mmol/L'], ['investigations', 'Blood', 'N', 'ABGs: pH ___, HCO3 ___ mmol/L'],
+  ['investigations', 'Blood', 'N', 'ALT ___ U/L'], ['investigations', 'Blood', 'N', 'Bilirubin ___ mg/dL'], ['investigations', 'Blood', 'N', 'CRP ___ mg/L'],
+  ['investigations', 'Blood', 'N', 'Blood group ___'], ['investigations', 'Blood', 'N', 'Blood culture: ___'],
+  ['investigations', 'Urine', 'N', 'Urine ketones ___'], ['investigations', 'Urine', 'N', 'Urine R/E: pus cells ___/HPF'],
+  ['investigations', 'Imaging', 'N', 'Chest X-ray: ___'], ['investigations', 'Imaging', 'N', 'ECG: ___'], ['investigations', 'Imaging', 'N', 'Ultrasound abdomen and pelvis: ___'],
+  ['investigations', 'Imaging', 'N', 'Obstetric ultrasound: ___'],
+  ['course', 'Medicine', 'N', 'Admitted and managed conservatively'], ['course', 'Medicine', 'N', 'IV fluids given'], ['course', 'Medicine', 'N', 'IV antibiotics given'],
+  ['course', 'Medicine', 'N', 'IV insulin infusion given as per DKA protocol'], ['course', 'Medicine', 'N', 'Shifted to subcutaneous insulin'],
+  ['course', 'Medicine', 'N', 'Blood sugars monitored and insulin adjusted'], ['course', 'Medicine', 'N', 'Electrolytes corrected'],
+  ['course', 'Medicine', 'N', 'Blood transfusion: ___ unit(s) given'], ['course', 'Medicine', 'N', 'Diabetes education given'],
+  ['course', 'Obstetrics', 'N', 'Spontaneous vaginal delivery conducted on ___'], ['course', 'Obstetrics', 'N', 'Lower segment caesarean section performed on ___ under spinal anaesthesia'],
+  ['course', 'Obstetrics', 'N', 'Baby: ___, weight ___ kg, Apgar ___'], ['course', 'Obstetrics', 'N', 'Wound care done'],
+  ['course', 'Outcome', 'N', 'Patient improved and discharged in stable condition'], ['course', 'Outcome', 'N', 'Discharged on request'], ['course', 'Outcome', 'N', 'Left against medical advice'],
+  ['discharge_meds', 'Diabetes', 'N', 'Tab. Metformin 500 mg'],
+  ['discharge_meds', 'Diabetes', 'N', 'Tab. Metformin 1 g'],
+  ['discharge_meds', 'Diabetes', 'N', 'Tab. Glimepiride 2 mg'],
+  ['discharge_meds', 'Diabetes', 'N', 'Tab. Sitagliptin 50 mg'],
+  ['discharge_meds', 'Diabetes', 'N', 'Tab. Empagliflozin 10 mg'],
+  ['discharge_meds', 'Diabetes', 'N', 'Inj. Insulin glargine ___ units'],
+  ['discharge_meds', 'Diabetes', 'N', 'Inj. Regular insulin ___ units'],
+  ['discharge_meds', 'Diabetes', 'N', 'Inj. Insulin 70/30 ___ units'],
+  ['discharge_meds', 'Blood pressure and heart', 'N', 'Tab. Amlodipine 5 mg'],
+  ['discharge_meds', 'Blood pressure and heart', 'N', 'Tab. Losartan 50 mg'],
+  ['discharge_meds', 'Blood pressure and heart', 'N', 'Tab. Methyldopa 250 mg'],
+  ['discharge_meds', 'Blood pressure and heart', 'N', 'Tab. Atorvastatin 20 mg'],
+  ['discharge_meds', 'Blood pressure and heart', 'N', 'Tab. Aspirin 75 mg'],
+  ['discharge_meds', 'Antibiotics', 'N', 'Cap. Cefixime 400 mg'],
+  ['discharge_meds', 'Antibiotics', 'N', 'Inj. Ceftriaxone 1 g'],
+  ['discharge_meds', 'Antibiotics', 'N', 'Inj. Ceftriaxone 2 g'],
+  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Co-amoxiclav 625 mg'],
+  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Metronidazole 400 mg'],
+  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Ciprofloxacin 500 mg'],
+  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Azithromycin 500 mg'],
+  ['discharge_meds', 'Antibiotics', 'N', 'Tab. Nitrofurantoin 100 mg'],
+  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Ferrous sulphate with folic acid'],
+  ['discharge_meds', 'Iron and vitamins', 'N', 'Cap. Ferrous fumarate with folic acid'],
+  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Iron polymaltose 100 mg'],
+  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Folic acid 5 mg'],
+  ['discharge_meds', 'Iron and vitamins', 'N', 'Inj. Iron sucrose ___ mg in ___ mL normal saline'],
+  ['discharge_meds', 'Iron and vitamins', 'N', 'Inj. Ferric carboxymaltose ___ mg'],
+  ['discharge_meds', 'Iron and vitamins', 'N', 'Tab. Calcium with vitamin D'],
+  ['discharge_meds', 'Pain', 'N', 'Tab. Paracetamol 500 mg'],
+  ['discharge_meds', 'Pain', 'N', 'Tab. Paracetamol 1 g'],
+  ['discharge_meds', 'Pain', 'N', 'Tab. Ibuprofen 400 mg'],
+  ['discharge_meds', 'Pain', 'N', 'Tab. Mefenamic acid 500 mg'],
+  ['discharge_meds', 'Pain', 'N', 'Tab. Diclofenac 50 mg'],
+  ['discharge_meds', 'Pain', 'N', 'Supp. Diclofenac 100 mg'],
+  ['discharge_meds', 'Pain', 'N', 'Tab. Tramadol 50 mg'],
+  ['discharge_meds', 'Stomach', 'N', 'Cap. Omeprazole 20 mg'],
+  ['discharge_meds', 'Stomach', 'N', 'Cap. Esomeprazole 40 mg'],
+  ['discharge_meds', 'Stomach', 'N', 'Tab. Domperidone 10 mg'],
+  ['discharge_meds', 'Stomach', 'N', 'Tab. Ondansetron 4 mg'],
+  ['discharge_meds', 'How often', 'S', 'once daily'],
+  ['discharge_meds', 'How often', 'S', 'twice daily'],
+  ['discharge_meds', 'How often', 'S', 'three times daily'],
+  ['discharge_meds', 'How often', 'S', 'at night'],
+  ['discharge_meds', 'How often', 'S', 'before breakfast'],
+  ['discharge_meds', 'How often', 'S', 'with meals'],
+  ['discharge_meds', 'How often', 'S', 'when needed'],
+  ['discharge_meds', 'How often', 'S', 'IV once daily'],
+  ['discharge_meds', 'How often', 'S', 'IV twice daily'],
+  ['discharge_meds', 'How often', 'S', 'IM once daily'],
+  ['discharge_meds', 'How often', 'S', 'in the rectum at night'],
+  ['discharge_meds', 'How long', 'S', 'for 3 days'],
+  ['discharge_meds', 'How long', 'S', 'for 5 days'],
+  ['discharge_meds', 'How long', 'S', 'for 7 days'],
+  ['discharge_meds', 'How long', 'S', 'for 2 weeks'],
+  ['discharge_meds', 'How long', 'S', 'for 1 month'],
+  ['discharge_meds', 'How long', 'S', 'for 3 months'],
+  ['discharge_meds', 'How long', 'S', 'to continue'],
+  ['follow_up', 'Visit', 'N', 'Follow up in OPD after 1 week'], ['follow_up', 'Visit', 'N', 'Follow up in OPD after 2 weeks'], ['follow_up', 'Visit', 'N', 'Follow up with reports'],
+  ['follow_up', 'Visit', 'N', 'Postnatal follow up after 6 weeks'], ['follow_up', 'Visit', 'N', 'Stitch removal on ___'], ['follow_up', 'Visit', 'N', 'Wound dressing every ___ days'],
+  ['follow_up', 'Advice', 'N', 'Check blood sugar fasting and 2 hours after meals; bring the record'], ['follow_up', 'Advice', 'N', 'Diabetic diet as advised'],
+  ['follow_up', 'Advice', 'N', 'Plenty of oral fluids'], ['follow_up', 'Advice', 'N', 'Breastfeeding encouraged'],
+  ['follow_up', 'Advice', 'N', 'Come back at once in case of fever, vomiting, drowsiness or symptoms of low sugar']
+];
+const SEED_STAFF = [['Dr. Sehrish Irfan', 'consultant', 'Gynaecologist & Obstetrician', 'MBBS, FCPS, MRCOG(UK), MHPE(s)', '0334-3337002'],
+  ['Dr. Shahina', 'consultant', '', '', '0300 4235009'],
+  ['Dr. Muhammad Irfan Alam', 'consultant', 'Diabetologist & Consultant Physician', 'MBBS, FCPS (Medicine), MHPE(s)', '']];
+function seedQuick_(sh) {
+  const by = 'starter list', on = todayIso_();
+  const rows = SEED_QUICK.map(function (r, i) { return ['q' + (i + 1), r[0], r[1], r[2], r[3], 'draft', by, on]; });
+  sh.getRange(2, 1, rows.length, QUICK_COLS.length).setValues(rows);
+}
+
+// ---------------------------------------------------------------- reading and writing tabs
+function readRows_(sh, cols) {
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return [];
+  return sh.getRange(2, 1, n, cols.length).getValues().map(function (v, i) {
+    const o = { _row: i + 2 }; cols.forEach(function (k, j) { o[k] = cellTxt_(v[j]).trim(); }); return o;
+  });
+}
+function dRows_(ss) { return readRows_(ss.getSheetByName('DISCHARGES'), DCOLS.map(function (c) { return c.key; })); }
+function writeRow_(sh, cols, row, o) { sh.getRange(row, 1, 1, cols.length).setValues([cols.map(function (k) { return o[k] === undefined ? '' : o[k]; })]); }
+function logIt_(user, action, ds, detail) {
+  try { ss_().getSheetByName('LOG').appendRow([nowTxt_(), user || '', action, ds || '', String(detail || '').slice(0, 500)]); } catch (e) { console.error('log: ' + e); }
+}
+function wbSchema_() { const v = Number(props_().getProperty('SCHEMA_VER')); return v > 0 ? v : 1; }
+function nextDs_(rows) {
+  const top = rows.reduce(function (m, r) { const x = new RegExp('^' + CFG.DS_PREFIX + '(\\d+)$').exec(r.ds_no); return x ? Math.max(m, +x[1]) : m; }, 0);
+  return CFG.DS_PREFIX + ('000' + (top + 1)).slice(-Math.max(4, String(top + 1).length));
+}
+
+// ---------------------------------------------------------------- users and invitations
+const ROLE_LISTS = { consultant: 'CONSULTANT_EMAILS', mo: 'MO_EMAILS' };
+function roleOf_(email) {
+  const e = (email || '').toLowerCase();
+  if (!e) return '';
+  if (e === piEmail_()) return 'pi';
+  if (emails_('CONSULTANT_EMAILS').indexOf(e) >= 0) return 'consultant';
+  if (emails_('MO_EMAILS').indexOf(e) >= 0) return 'mo';
+  return '';
+}
+function menuUsers() {
+  requirePI_();
+  const ui = SpreadsheetApp.getUi(), P = props_();
+  const lists = [['CONSULTANT_EMAILS', 'Consultants (can finalise summaries)'], ['MO_EMAILS', 'Medical officers (can write drafts)']];
+  for (let i = 0; i < lists.length; i++) {
+    const r = ui.prompt('Manage users', lists[i][1] + ': Google e-mails separated by commas. You (' + piEmail_() + ') are the PI and need no entry.\n\nNow: ' + (P.getProperty(lists[i][0]) || 'nobody'), ui.ButtonSet.OK_CANCEL);
+    if (r.getSelectedButton() !== ui.Button.OK) return;
+    const t = r.getResponseText().trim();
+    if (t === '') continue;                                   // blank keeps the list as it is
+    const list = t === '-' ? [] : t.split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(function (s) { return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s); });
+    P.setProperty(lists[i][0], list.join(','));
+  }
+  logIt_(me_(), 'users', '', 'consultants ' + emails_('CONSULTANT_EMAILS').length + ', medical officers ' + emails_('MO_EMAILS').length);
+  ui.alert('Saved', 'Consultants: ' + (emails_('CONSULTANT_EMAILS').join(', ') || 'none') + '\nMedical officers: ' + (emails_('MO_EMAILS').join(', ') || 'none') + '\n\nType a single - to empty a list. Leave a box blank to keep it.', ui.ButtonSet.OK);
+}
+function inviteLink_(email) {
+  const P = props_(), code = randomHex_(32);
+  P.setProperty('APPJOIN_' + sha256_(code), JSON.stringify({ email: email, expires: Date.now() + APP_JOIN_DAYS * 864e5 }));
+  return P.getProperty('APP_URL').replace(/#.*$/, '') + '#join=' + encodeURIComponent(P.getProperty('API_URL')) + '~' + code;
+}
+function menuInvite() {
+  requirePI_();
+  const ui = SpreadsheetApp.getUi(), P = props_();
+  if (!P.getProperty('API_URL')) {
+    const svc = ScriptApp.getService(), live = svc && svc.getUrl ? svc.getUrl() : '';
+    const q = ui.prompt('Web app address', 'Paste the web app URL from Deploy > Manage deployments (it ends with /exec). Asked only once.' + (live ? '\n\nThe project reports: ' + live : ''), ui.ButtonSet.OK_CANCEL);
+    if (q.getSelectedButton() !== ui.Button.OK) return;
+    const api = q.getResponseText().trim();
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(api)) { ui.alert('Not saved', 'That is not a web app address ending in /exec.', ui.ButtonSet.OK); return; }
+    P.setProperty('API_URL', api);
+  }
+  if (!P.getProperty('APP_URL')) {
+    const a = ui.prompt('Phone app address', 'Address where the Bari Discharge app is published (https://...):', ui.ButtonSet.OK_CANCEL);
+    if (a.getSelectedButton() !== ui.Button.OK) return;
+    const url = a.getResponseText().trim();
+    if (!/^(https:\/\/\S+|http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/\S*)$/.test(url)) { ui.alert('Not saved', 'The address must start with https://', ui.ButtonSet.OK); return; }
+    P.setProperty('APP_URL', url);
+  }
+  const b = ui.prompt('Invite a phone', 'Google e-mail of the person (you, a consultant or a medical officer from "manage users"):', ui.ButtonSet.OK_CANCEL);
+  if (b.getSelectedButton() !== ui.Button.OK) return;
+  const email = b.getResponseText().trim().toLowerCase(), role = roleOf_(email);
+  if (!role) { ui.alert('Not invited', email + ' is not in a user list. Add them with "PI: manage users" first.', ui.ButtonSet.OK); return; }
+  const link = inviteLink_(email);
+  logIt_(me_(), 'invite', '', email + ' (' + ROLE_NAMES[role] + ')');
+  ui.alert('Invitation for ' + email + ' (' + ROLE_NAMES[role] + ')', 'Send this link to ' + email + ' privately. It works once, on one phone, and expires in ' + APP_JOIN_DAYS + ' days:\n\n' + link, ui.ButtonSet.OK);
+}
+function menuRevoke() {
+  requirePI_();
+  const ui = SpreadsheetApp.getUi(), P = props_();
+  const b = ui.prompt('Revoke a phone', 'Google e-mail whose phones should lose access:', ui.ButtonSet.OK_CANCEL);
+  if (b.getSelectedButton() !== ui.Button.OK) return;
+  const n = revoke_(b.getResponseText());
+  logIt_(me_(), 'revoke', '', b.getResponseText().trim().toLowerCase() + ' (' + n + ')');
+  ui.alert('Revoked', n + ' phone(s) or unused invitation(s) can no longer reach the records.', ui.ButtonSet.OK);
+}
+function revoke_(email) {
+  const P = props_(), all = P.getProperties(), e = String(email || '').trim().toLowerCase();
+  let n = 0;
+  Object.keys(all).forEach(function (k) {
+    if (!/^APP(JOIN)?_/.test(k)) return;
+    try { if (JSON.parse(all[k]).email === e) { P.deleteProperty(k); n++; } } catch (x) { /* not an app entry */ }
+  });
+  return n;
+}
+function menuApproveQuick() {
+  requirePI_();
+  const n = approveQuick_();
+  logIt_(me_(), 'quick buttons approved', '', String(n));
+  SpreadsheetApp.getUi().alert('Approved', n + ' draft quick button(s) are now live on every phone (after their next sync).', SpreadsheetApp.getUi().ButtonSet.OK);
+}
+function approveQuick_() {
+  const sh = ss_().getSheetByName('QUICK'), rows = readRows_(sh, QUICK_COLS);
+  let n = 0;
+  rows.forEach(function (r) { if (r.status.toLowerCase() !== 'live') { sh.getRange(r._row, QUICK_COLS.indexOf('status') + 1).setValue('live'); n++; } });
+  return n;
+}
+
+// ---------------------------------------------------------------- web app (phone) API
+function appJson_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
+function appUser_(token) {
+  if (!/^[0-9a-f]{64}$/.test(str_(token))) return null;
+  const raw = props_().getProperty('APP_' + sha256_(token));
+  if (!raw) return null;
+  const u = JSON.parse(raw), role = roleOf_(u.email);
+  if (!role) return null;
+  u.role = role;
+  return u;
+}
+function doGet() { return appJson_({ ok: true, system: 'BARI-DS', version: CFG.VERSION }); }
+function doPost(e) {
+  let req;
+  try { req = JSON.parse(e && e.postData ? e.postData.contents : '{}'); } catch (err) { return appJson_({ ok: false, error: 'bad request' }); }
+  try {
+    if (req.op === 'join') return appJson_(appJoin_(req));
+    const u = appUser_(req.token);
+    if (!u) return appJson_({ ok: false, error: 'not authorised', code: 401 });
+    if (req.op === 'hello') return appJson_({ ok: true, schema: wbSchema_(), version: CFG.VERSION });
+    if (wbSchema_() !== CFG.SCHEMA_VER) return appJson_({ ok: false, error: 'The workbook is being upgraded. Your entries stay on this phone.', code: 409 });
+    if (req.op === 'pull') return appJson_(appPull_(u));
+    if (req.op === 'push') {
+      if (Number(req.schema) !== CFG.SCHEMA_VER) return appJson_({ ok: false, error: 'This app and the workbook are different versions. Close the app and open it again while online.', code: 409 });
+      return appJson_(appPush_(u, req.changes || []));
+    }
+    if (req.op === 'search') return appJson_(appSearch_(u, req));
+    if (req.op === 'quick_add') return appJson_(quickAdd_(u, req));
+    if (req.op === 'quick_approve') return appJson_(quickApprove_(u));
+    if (req.op === 'quick_delete') return appJson_(quickDelete_(u, req));
+    if (req.op === 'template_save') return appJson_(templateSave_(u, req));
+    if (req.op === 'template_delete') return appJson_(templateDelete_(u, req));
+    if (req.op === 'invite') return appJson_(appInvite_(u, req));
+    return appJson_({ ok: false, error: 'unknown operation' });
+  } catch (err) {
+    console.error('doPost: ' + (err && err.stack ? err.stack : err));
+    return appJson_({ ok: false, error: 'server error: ' + (err && err.message ? err.message : err) });
+  }
+}
+function withLock_(fn) { const l = LockService.getScriptLock(); l.waitLock(20000); try { return fn(); } finally { l.releaseLock(); } }
+
+function appJoin_(req) {
+  const P = props_(), code = str_(req.code);
+  if (!/^[0-9a-f]{32}$/.test(code)) return { ok: false, error: 'invalid invitation' };
+  const k = 'APPJOIN_' + sha256_(code), raw = P.getProperty(k);
+  if (!raw) return { ok: false, error: 'this invitation has already been used or was withdrawn' };
+  const inv = JSON.parse(raw);
+  P.deleteProperty(k);
+  if (Date.now() > inv.expires) return { ok: false, error: 'this invitation has expired; ask the PI for a new one' };
+  const role = roleOf_(inv.email);
+  if (!role) return { ok: false, error: 'this account no longer has a role' };
+  const token = randomHex_(64);
+  P.setProperty('APP_' + sha256_(token), JSON.stringify({ email: inv.email, issued: Date.now(), device: str_(req.device).slice(0, 60) }));
+  logIt_(inv.email, 'phone joined', '', str_(req.device).slice(0, 60));
+  return { ok: true, token: token, email: inv.email, role: role };
+}
+function appInvite_(u, req) {
+  if (u.role !== 'pi') return { ok: false, error: 'only the PI can invite' };
+  const P = props_(), email = str_(req.email).toLowerCase(), role = str_(req.role);
+  if (!/^[^@\s,]+@[^@\s,]+\.[^@\s,]+$/.test(email)) return { ok: false, error: 'that is not an e-mail address' };
+  if (email === piEmail_()) return { ok: false, error: 'that is the PI account' };
+  if (!ROLE_LISTS[role]) return { ok: false, error: 'choose a role' };
+  if (!P.getProperty('API_URL') || !P.getProperty('APP_URL')) return { ok: false, error: 'make the first invitation from the workbook menu' };
+  withLock_(function () {
+    Object.keys(ROLE_LISTS).forEach(function (r) {
+      const list = emails_(ROLE_LISTS[r]).filter(function (x) { return x !== email; });
+      if (r === role) list.push(email);
+      P.setProperty(ROLE_LISTS[r], list.join(','));
+    });
+  });
+  logIt_(u.email, 'invite', '', email + ' (' + ROLE_NAMES[role] + ')');
+  return { ok: true, email: email, roleName: ROLE_NAMES[role], link: inviteLink_(email), days: APP_JOIN_DAYS };
+}
+
+function quickRows_() { return readRows_(ss_().getSheetByName('QUICK'), QUICK_COLS); }
+function appPull_(u) {
+  const ss = ss_(), today = dayNo_(todayIso_());
+  const rows = dRows_(ss).filter(function (r) {
+    if (r.status !== 'F') return true;                                  // every draft
+    const d = dayNo_(r.discharge_date) || dayNo_(String(r.updated_at).slice(0, 10));
+    return d === null || today - d <= CFG.PULL_DAYS;
+  }).map(function (r) { delete r._row; return r; });
+  const quick = quickRows_().filter(function (q) { return q.phrase && SECTIONS.indexOf(q.section) >= 0 && (u.role === 'pi' || q.status.toLowerCase() === 'live'); })
+    .map(function (q) { return { qid: q.qid, section: q.section, group: q.group, join: code_(q.join) || 'N', phrase: q.phrase, draft: q.status.toLowerCase() !== 'live' }; });
+  const templates = readRows_(ss.getSheetByName('TEMPLATES'), TEMPLATE_COLS).filter(function (t) { return t.name; }).map(function (t) { delete t._row; return t; });
+  const staff = readRows_(ss.getSheetByName('STAFF'), STAFF_COLS).filter(function (s) { return s.name; }).map(function (s) { return { name: s.name, role: s.role.toLowerCase() === 'mo' ? 'mo' : 'consultant', specialty: s.specialty, qualifications: s.qualifications, phone: s.phone }; });
+  return { ok: true, email: u.email, role: u.role, roleName: ROLE_NAMES[u.role], version: CFG.VERSION, schema: CFG.SCHEMA_VER, today: todayIso_(), rows: rows, quick: quick, templates: templates, staff: staff };
+}
+function appSearch_(u, req) {
+  const q = str_(req.q).toLowerCase();
+  if (q.length < 2) return { ok: false, error: 'type at least 2 letters' };
+  const rows = dRows_(ss_()).filter(function (r) { return (r.name + ' ' + r.father_husband + ' ' + r.ds_no).toLowerCase().indexOf(q) >= 0; })
+    .slice(-50).map(function (r) { delete r._row; return r; });
+  return { ok: true, rows: rows };
+}
+
+// Each change: { cid, uid, create, values, base }. base holds the values the phone last saw, so a field someone else changed meanwhile is not overwritten.
+function appPush_(u, changes) {
+  if (!roleCan_(u.role, 'edit')) return { ok: false, error: 'this role cannot write' };
+  if (!Array.isArray(changes) || changes.length > 20) return { ok: false, error: 'bad batch' };
+  return withLock_(function () {
+    const ss = ss_(), sh = ss.getSheetByName('DISCHARGES'), keys = DCOLS.map(function (c) { return c.key; });
+    const rows = dRows_(ss), results = [];
+    changes.forEach(function (ch) {
+      const res = { cid: str_(ch.cid) };
+      try {
+        const uid = str_(ch.uid);
+        if (!/^[0-9a-f]{24}$/.test(uid)) throw new Error('bad record id');
+        const vals = ch.values || {}, base = ch.base || {};
+        const bad = Object.keys(vals).filter(function (k) { return EDITABLE.indexOf(k) < 0 || typeof vals[k] !== 'string'; });
+        if (bad.length) throw new Error('not allowed: ' + bad.join(', '));
+        let row = rows.filter(function (r) { return r.uid === uid; })[0];
+        if (!row && !ch.create) throw new Error('this record is no longer in the workbook');
+        const before = row ? JSON.parse(JSON.stringify(row)) : null;
+        const isNew = !row;
+        if (isNew) { row = { uid: uid, status: 'D' }; }
+        // someone else changed a field since this phone last saw it: keep theirs and say so
+        const conflicts = isNew ? [] : Object.keys(vals).filter(function (k) {
+          return base[k] !== undefined && str_(row[k]) !== str_(base[k]) && str_(row[k]) !== str_(vals[k]);
+        });
+        if (conflicts.length) { res.status = 'conflict'; res.errors = conflicts.map(function (k) { return colOf_(k).label + ' was changed by ' + (row.updated_by || 'someone else'); }); res.current = row; delete res.current._row; results.push(res); return; }
+        const next = JSON.parse(JSON.stringify(row));
+        Object.keys(vals).forEach(function (k) { next[k] = k === 'status' || colOf_(k).type === 'code' ? code_(vals[k]) : String(vals[k]).replace(/\r\n?/g, '\n').trim(); });
+        if (before && before.status === 'F' && !roleCan_(u.role, 'finalise')) throw new Error('this summary is final; only a consultant can change it');
+        if (next.status === 'F' && (!before || before.status !== 'F') && !roleCan_(u.role, 'finalise')) throw new Error('only a consultant can finalise');
+        const probs = rowProblems_(next);
+        if (probs.length) throw new Error(probs.join('; '));
+        if (next.status === 'F') { const g = finalGaps_(next); if (g.length) throw new Error('to finalise, fill in: ' + g.join(', ')); }
+        if (!str_(next.name)) throw new Error('the patient’s name is needed');
+        const changed = keys.filter(function (k) { return !before || str_(before[k]) !== str_(next[k]); });
+        if (!isNew && changed.length === 0) { res.status = 'ok'; res.ds_no = row.ds_no; results.push(res); return; }   // a retry of a change already saved
+        const at = nowTxt_(), by = str_(ch.by).slice(0, 60) || u.email;
+        next.updated_by = by; next.updated_at = at;
+        if (isNew) { next.ds_no = nextDs_(rows); next.created_by = by; next.created_at = at; }
+        if (next.status === 'F' && (!before || before.status !== 'F')) { next.finalised_by = by; next.finalised_at = at; }
+        if (next.status === 'D') { next.finalised_by = ''; next.finalised_at = ''; }
+        if (isNew) { const r = sh.getLastRow() + 1; writeRow_(sh, keys, r, next); next._row = r; rows.push(next); }
+        else { writeRow_(sh, keys, row._row, next); next._row = row._row; rows[rows.indexOf(row)] = next; }
+        logIt_(u.email, isNew ? 'created' : next.status === 'F' && before.status !== 'F' ? 'finalised' : before && before.status === 'F' && next.status === 'D' ? 'reopened' : 'changed', next.ds_no, changed.join(', '));
+        res.status = 'ok'; res.ds_no = next.ds_no;
+      } catch (err) { res.status = 'refused'; res.errors = [String(err.message || err)]; }
+      results.push(res);
+    });
+    return { ok: true, results: results };
+  });
+}
+
+function quickAdd_(u, req) {
+  if (!roleCan_(u.role, 'quickAdd')) return { ok: false, error: 'this role cannot add buttons' };
+  const sec = str_(req.section), phrase = str_(req.phrase).replace(/\s+/g, ' '), group = str_(req.group).slice(0, 40) || 'Added', join = code_(req.join) || 'N';
+  if (SECTIONS.indexOf(sec) < 0) return { ok: false, error: 'unknown section' };
+  if (phrase.length < 2 || phrase.length > 200) return { ok: false, error: 'a button holds 2 to 200 characters' };
+  if (!JOINS.some(function (j) { return j[0] === join; })) return { ok: false, error: 'bad join' };
+  return withLock_(function () {
+    const sh = ss_().getSheetByName('QUICK'), rows = readRows_(sh, QUICK_COLS);
+    const dup = rows.filter(function (r) { return r.section === sec && r.phrase.toLowerCase() === phrase.toLowerCase(); })[0];
+    if (dup) return { ok: true, qid: dup.qid, already: true };
+    const top = rows.reduce(function (m, r) { const x = /^q(\d+)$/.exec(r.qid); return x ? Math.max(m, +x[1]) : m; }, 0);
+    const q = { qid: 'q' + (top + 1), section: sec, group: group, join: join, phrase: phrase, status: roleCan_(u.role, 'quickLive') ? 'live' : 'draft', added_by: str_(req.by).slice(0, 60) || u.email, added_on: todayIso_() };
+    writeRow_(sh, QUICK_COLS, sh.getLastRow() + 1, q);
+    logIt_(u.email, 'quick button added', '', sec + ': ' + phrase);
+    return { ok: true, qid: q.qid, status: q.status };
+  });
+}
+function quickApprove_(u) {
+  if (!roleCan_(u.role, 'quickApprove')) return { ok: false, error: 'only the PI can approve' };
+  const n = withLock_(approveQuick_);
+  logIt_(u.email, 'quick buttons approved', '', n + ' from the phone');
+  return { ok: true, n: n };
+}
+function quickDelete_(u, req) {
+  if (u.role !== 'pi') return { ok: false, error: 'only the PI can delete buttons' };
+  return withLock_(function () {
+    const sh = ss_().getSheetByName('QUICK'), r = readRows_(sh, QUICK_COLS).filter(function (x) { return x.qid === str_(req.qid); })[0];
+    if (!r) return { ok: true, gone: true };
+    sh.deleteRow(r._row);
+    logIt_(u.email, 'quick button deleted', '', r.section + ': ' + r.phrase);
+    return { ok: true };
+  });
+}
+function templateSave_(u, req) {
+  if (!roleCan_(u.role, 'template')) return { ok: false, error: 'only a consultant can save templates' };
+  const name = str_(req.name).slice(0, 60), v = req.values || {};
+  if (name.length < 2) return { ok: false, error: 'give the template a name' };
+  return withLock_(function () {
+    const sh = ss_().getSheetByName('TEMPLATES'), rows = readRows_(sh, TEMPLATE_COLS);
+    const old = rows.filter(function (t) { return t.name.toLowerCase() === name.toLowerCase(); })[0];
+    const top = rows.reduce(function (m, r) { const x = /^t(\d+)$/.exec(r.tid); return x ? Math.max(m, +x[1]) : m; }, 0);
+    const t = { tid: old ? old.tid : 't' + (top + 1), name: name, saved_by: str_(req.by).slice(0, 60) || u.email, saved_on: todayIso_() };
+    SECTIONS.forEach(function (k) { t[k] = str_(v[k]).slice(0, CFG.TEXT_MAX); });
+    writeRow_(sh, TEMPLATE_COLS, old ? old._row : sh.getLastRow() + 1, t);
+    logIt_(u.email, 'template saved', '', name);
+    return { ok: true, tid: t.tid, replaced: !!old };
+  });
+}
+function templateDelete_(u, req) {
+  if (!roleCan_(u.role, 'template')) return { ok: false, error: 'only a consultant can delete templates' };
+  return withLock_(function () {
+    const sh = ss_().getSheetByName('TEMPLATES'), r = readRows_(sh, TEMPLATE_COLS).filter(function (x) { return x.tid === str_(req.tid); })[0];
+    if (r) { sh.deleteRow(r._row); logIt_(u.email, 'template deleted', '', r.name); }
+    return { ok: true };
+  });
+}
+
+// ---------------------------------------------------------------- update this script from GitHub (PI only, confirmed with the 8-character code)
+const UPDATE_SRC = 'https://raw.githubusercontent.com/IR1S-VIR1S/bari-discharge/main/script/BariDischarge.gs';
+function menuUpdateHelp() {
+  SpreadsheetApp.getUi().alert('Update without re-inviting anyone',
+    '1. Extensions > Apps Script. Select all the code, paste the new version over it, Save.\n\n' +
+    '2. Deploy > Manage deployments > the pencil > Version: "New version" > Deploy. Never "New deployment": that makes a new address and every phone would need an invitation.\n\n' +
+    '3. Reload this workbook.\n\nOr use "PI: update the script from GitHub" with the update code given in the chat.', SpreadsheetApp.getUi().ButtonSet.OK);
+}
+function hex_(bytes) { return bytes.map(function (b) { return ('0' + (b < 0 ? b + 256 : b).toString(16)).slice(-2); }).join(''); }
+function sha256hex_(text) { return hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, text, Utilities.Charset.UTF_8)); }
+function scriptApi_(method, path, body) {
+  const r = UrlFetchApp.fetch('https://script.googleapis.com/v1/' + path, { method: method, contentType: 'application/json', muteHttpExceptions: true,
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, payload: body ? JSON.stringify(body) : undefined });
+  const code = r.getResponseCode(), text = r.getContentText();
+  if (code >= 300) {
+    const raw = '\n\nGoogle said: ' + String(text).replace(/\s+/g, ' ').slice(0, 300);
+    if (code === 403 && /User has not enabled the Apps Script API/i.test(text)) throw new Error('The Apps Script API is off for your account. Open https://script.google.com/home/usersettings , turn it on, wait a few minutes and try again.' + raw);
+    if (code === 403 && /SERVICE_DISABLED|has not been used in project|accessNotConfigured/i.test(text)) { const m = /project[ =](\d+)/i.exec(text); throw new Error('The Apps Script API is not on in the Google Cloud project behind this script' + (m ? ' (project ' + m[1] + ')' : '') + '. Send this message to Claude.' + raw); }
+    throw new Error('Google answered with error ' + code + '. Check the oauthScopes in appsscript.json.' + raw);
+  }
+  return text ? JSON.parse(text) : {};
+}
+function menuUpdateScript() {
+  requirePI_();
+  const ui = SpreadsheetApp.getUi(), id = ScriptApp.getScriptId();
+  const stop = function (t, m) { ui.alert(t, m + '\n\nNothing was changed.', ui.ButtonSet.OK); };
+  let res;
+  try { res = UrlFetchApp.fetch(UPDATE_SRC + '?t=' + Date.now(), { muteHttpExceptions: true }); } catch (e) { stop('Could not reach GitHub', String(e.message || e)); return; }
+  if (res.getResponseCode() !== 200) { stop('Could not read the new script', 'GitHub answered ' + res.getResponseCode() + '.'); return; }
+  const code = res.getContentText(), hash = sha256hex_(code);
+  const missing = ['onOpen', 'doPost', 'menuUpdateScript', 'setup'].filter(function (m) { return code.indexOf('function ' + m) < 0; });
+  if (missing.length) { stop('The new script looks incomplete', 'It lacks: ' + missing.join(', ') + '.'); return; }
+  let changed = false;
+  try {
+    const cur = scriptApi_('GET', 'projects/' + id + '/content');
+    const mine = (cur.files || []).filter(function (f) { return f.type === 'SERVER_JS' && /function onOpen\b/.test(f.source || ''); });
+    if (mine.length !== 1) { stop('Cannot tell which file is the script', 'Found ' + mine.length + '. Update by pasting instead.'); return; }
+    const curHash = sha256hex_(mine[0].source);
+    if (curHash === hash) { ui.alert('Already up to date', 'Code ' + hash.slice(0, 8) + ' is installed.', ui.ButtonSet.OK); return; }
+    const ask = ui.prompt('Update the script', 'Installed: code ' + curHash.slice(0, 8) + '.\n\nType the 8-character update code Claude gave you in the chat. If you have none, press Cancel.', ui.ButtonSet.OK_CANCEL);
+    if (ask.getSelectedButton() !== ui.Button.OK) return;
+    if (ask.getResponseText().trim().toLowerCase() !== hash.slice(0, 8)) { stop('The code does not match', 'The file on GitHub is not the one the code is for, or the code was mistyped.'); return; }
+    const stamp = nowTxt_();
+    const before = scriptApi_('POST', 'projects/' + id + '/versions', { description: 'before update ' + stamp + ' (' + curHash.slice(0, 8) + ')' });
+    mine[0].source = code;
+    scriptApi_('PUT', 'projects/' + id + '/content', { files: cur.files.map(function (f) { return { name: f.name, type: f.type, source: f.source }; }) });
+    changed = true;
+    const after = scriptApi_('POST', 'projects/' + id + '/versions', { description: 'update ' + stamp + ' (' + hash.slice(0, 8) + ')' });
+    const deps = (scriptApi_('GET', 'projects/' + id + '/deployments').deployments || []).filter(function (d) {
+      return d.deploymentConfig && d.deploymentConfig.versionNumber && (d.entryPoints || []).some(function (x) { return x.entryPointType === 'WEB_APP'; });
+    });
+    let where;
+    if (deps.length === 1) {
+      scriptApi_('PUT', 'projects/' + id + '/deployments/' + deps[0].deploymentId, { deploymentConfig: { scriptId: id, versionNumber: after.versionNumber, manifestFileName: 'appsscript', description: 'update ' + stamp } });
+      where = 'The web app moved to version ' + after.versionNumber + ' at the same address.';
+    } else where = 'The web app was NOT moved (' + deps.length + ' web app deployments found). Deploy > Manage deployments > pencil > New version > Deploy.';
+    logIt_(me_(), 'script updated', '', curHash.slice(0, 8) + ' to ' + hash.slice(0, 8));
+    ui.alert('Script updated', 'Code ' + hash.slice(0, 8) + ' installed.\n\n' + where + '\n\nReload the workbook. To undo: Manage deployments > pencil > version ' + before.versionNumber + '.', ui.ButtonSet.OK);
+  } catch (e) {
+    if (changed) ui.alert('The update stopped part way', 'The new code is installed but the web app was not moved. ' + String(e.message || e) + '\n\nDeploy > Manage deployments > pencil > New version > Deploy.', ui.ButtonSet.OK);
+    else stop('The update did not finish', String(e.message || e));
+  }
+}
