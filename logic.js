@@ -126,6 +126,31 @@ function gpLine_(row) {
 function labsLine_(row) {
   return ['hb', 'tlc', 'plt'].filter(function (k) { return str_(row[k]) !== ''; }).map(function (k) { const c = colOf_(k); return c.label + ' ' + str_(row[k]) + ' ' + c.unit; }).join('   |   ');
 }
+// Urdu instructions for each medicine line, built from the English wording (printed next to the line on the PDF).
+// A line can carry its own wording after " | ", for example: Tab. X 10 mg once daily | صبح خالی پیٹ
+const URDU_FORM = [[/^tab\.?\s/i, 'ایک گولی'], [/^cap\.?\s/i, 'ایک کیپسول'], [/^inj\.?\s/i, 'انجکشن'], [/^supp\.?\s/i, 'ایک بتی'], [/^syp\.?\s/i, 'شربت']];
+const URDU_TERMS = [
+  [/\b2 tablets\b/i, 'دو گولیاں', 'dose'], [/\b1 tablet\b/i, 'ایک گولی', 'dose'],
+  [/\bIV\b/, 'رگ میں', 'route'], [/\bIM\b/, 'پٹھے میں', 'route'], [/\bin the rectum\b/i, 'پاخانے کے راستے', 'route'],
+  [/\bthree times daily\b/i, 'دن میں تین بار', 'freq'], [/\btwice daily\b/i, 'دن میں دو بار', 'freq'], [/\bonce daily\b/i, 'دن میں ایک بار', 'freq'],
+  [/\bat night\b/i, 'رات کو', 'when'], [/\bbefore breakfast\b/i, 'ناشتے سے پہلے', 'when'], [/\bwith meals\b/i, 'کھانے کے ساتھ', 'when'], [/\bwhen needed\b/i, 'ضرورت پڑنے پر', 'when'],
+  [/\bto continue\b/i, 'جاری رکھیں', 'dur']
+];
+function urduFor_(line) {
+  const s = str_(line);
+  if (!s || s.indexOf('___') >= 0) return '';
+  const bar = s.indexOf(' | ');
+  if (bar >= 0) return str_(s.slice(bar + 3));
+  const got = {};
+  URDU_TERMS.forEach(function (t) { if (!got[t[2]] && t[0].test(s)) got[t[2]] = t[1]; });
+  const d = /\bfor (\d+) (day|days|week|weeks|month|months)\b/i.exec(s);
+  if (d) got.dur = d[1] + ' ' + (/^day/i.test(d[2]) ? 'دن' : /^week/i.test(d[2]) ? 'ہفتے' : 'مہینے') + ' تک';
+  if (!got.freq && !got.when && !got.dur) return '';
+  const form = URDU_FORM.filter(function (f) { return f[0].test(s); })[0];
+  const head = got.dose || (form ? form[1] : '');
+  return [head, got.route, got.freq, got.when, got.dur].filter(function (x) { return x; }).join('، ');
+}
+function medEnglish_(line) { const s = str_(line), bar = s.indexOf(' | '); return bar >= 0 ? str_(s.slice(0, bar)) : s; }
 function finalGaps_(row) { return FINAL_NEEDS.filter(function (k) { return str_(row[k]) === ''; }).map(function (k) { return colOf_(k).label; }); }
 function rowProblems_(row) {
   const out = [];

@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.0';
-const BUILD_ID = 'afadde769622';
+const BUILD_ID = '76bbac0403cc';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -584,9 +584,12 @@ function sectionField(k, set) {
   const qs = quickFor(k, T.form.vals), groups = [];
   qs.forEach((q) => { if (groups.indexOf(q.group) < 0) groups.push(q.group); });
   const use = S.usage || {}, top = qs.filter((q) => use[q.qid]).sort((a, b) => use[b.qid] - use[a.qid]).slice(0, 6);
-  const chip = (q) => el('button', { class: 'chip q' + (q.draft ? ' draft' : ''), type: 'button', title: q.draft ? 'Draft: only the PI sees it until approved' : '', onclick: () => { insertPhrase(ta, q); set(k, ta.value); grow(); S.usage[q.qid] = (S.usage[q.qid] || 0) + 1; } }, q.phrase);
+  const chip = (q) => el('button', { class: 'chip q' + (q.draft ? ' draft' : ''), type: 'button', title: q.draft ? 'Draft: only the PI sees it until approved' : '', onclick: () => { insertPhrase(ta, q); set(k, ta.value); grow(); ta.dispatchEvent(new Event('input')); S.usage[q.qid] = (S.usage[q.qid] || 0) + 1; } }, q.phrase);
   const blocks = (top.length ? [['Most used', top]] : []).concat(groups.map((g) => [g, qs.filter((q) => q.group === g)]));
-  return el('section', { class: 'card sec', id: 'w-' + k }, el('h2', null, el('label', { for: 'f-' + k }, colDef(k).label)), ta,
+  const preview = k === 'discharge_meds' ? el('div', { class: 'urdu-prev', id: 'urdu-prev', lang: 'ur', dir: 'rtl' }) : null;
+  const paintUrdu = () => { if (!preview) return; preview.replaceChildren(...ta.value.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => el('div', { class: urduFor_(l) ? '' : 'none' }, urduFor_(l) || 'No Urdu wording for this line. Add it after " | ".'))); };
+  if (preview) { ta.addEventListener('input', paintUrdu); setTimeout(paintUrdu, 0); }
+  return el('section', { class: 'card sec', id: 'w-' + k }, el('h2', null, el('label', { for: 'f-' + k }, colDef(k).label)), ta, preview,
     blocks.map((b) => el('div', { class: 'qgroup' }, el('div', { class: 'qlab' }, b[0]), el('div', { class: 'chips' }, b[1].map(chip)))),
     el('div', { class: 'secacts' },
       el('button', { class: 'linkbtn', type: 'button', onclick: () => { ta.value = ''; set(k, ''); grow(); } }, 'Clear'),
@@ -828,7 +831,28 @@ function jpegSize(b) { let i = 2; while (i < b.length) { if (b[i] !== 0xff) { i+
 const ASSETS = {};
 async function asset(name) { if (!ASSETS[name]) { try { ASSETS[name] = new Uint8Array(await (await fetch(name)).arrayBuffer()); } catch (e) { ASSETS[name] = new Uint8Array(0); } } return ASSETS[name]; }
 async function logoBytes() { return asset('logo.jpg'); }
-async function pdfImages() { return { logo: await asset('logo.jpg'), qr: await asset('qr.jpg') }; }
+async function pdfImages(r) { return { logo: await asset('logo.jpg'), qr: await asset('qr.jpg'), urdu: r ? await urduImages(r) : [] }; }
+// Each medicine's Urdu wording is drawn by the phone with the bundled Noto Nastaliq Urdu font and placed in the PDF as a small picture
+// (the PDF's own fonts have no Urdu letters, and the phone shapes Nastaliq correctly).
+async function urduImages(r) {
+  const lines = s_(r.discharge_meds).split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!lines.some((l) => urduFor_(l))) return [];
+  try { await document.fonts.load('48px BariUrdu', '\u0627\u0628'); } catch (e) { /* the fallback font still draws Urdu */ }
+  return lines.map((l) => {
+    const t = urduFor_(l);
+    if (!t) return null;
+    const px = 52, c = document.createElement('canvas'), x = c.getContext('2d');
+    x.font = px + 'px BariUrdu, "Noto Nastaliq Urdu", serif';
+    const w = Math.ceil(x.measureText(t).width) + 20, h = Math.ceil(px * 2.3);
+    c.width = w; c.height = h;
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); g.fillStyle = '#000';
+    g.font = px + 'px BariUrdu, "Noto Nastaliq Urdu", serif'; g.direction = 'rtl'; g.textAlign = 'right'; g.textBaseline = 'alphabetic';
+    g.fillText(t, w - 10, Math.round(px * 1.45));
+    const b64 = c.toDataURL('image/jpeg', 0.92).split(',')[1], bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+    return { bytes, g: jpegSize(bytes), text: t };
+  });
+}
 const normName = (n) => s_(n).toLowerCase().replace(/^dr\.?\s*/, '').replace(/[^a-z]/g, '');
 function staffOf(name) { const k = normName(name); return k ? ((S && S.server && S.server.staff) || []).filter((x) => normName(x.name) === k)[0] || null : null; }
 function buildPdf(r, imgs) {
@@ -864,7 +888,7 @@ function buildPdf(r, imgs) {
     }
     if (!final) ops.push('q 0.85 g BT /F2 64 Tf 0.819 0.574 -0.574 0.819 150 300 Tm (DRAFT) Tj ET Q');
   };
-  const need = (h) => { if (y - h < M + 30) newPage(false); };
+  const need = (h) => { if (y - h < M) newPage(false); };
   newPage(true);
   // the patient box, as on the pad
   const cell = (x, yy, w, h, label, val) => { rect(x, yy - h, w, h); T_(x + 5, yy - 11, label, 7.5, true); wrap(val, 10.5, w - 10).slice(0, 2).forEach((l, i) => T_(x + 5, yy - 25 - i * 12, l, 10.5, false)); };
@@ -877,24 +901,60 @@ function buildPdf(r, imgs) {
   ];
   rows.forEach((row) => { let x = M; const h = row.some((c) => wrap(c[2] || '', 10.5, c[0] * CW - 10).length > 1) ? 44 : 34; row.forEach((c) => { cell(x, y, c[0] * CW, h, c[1], c[2] || ''); x += c[0] * CW; }); y -= h; });
   y -= 14;
-  // the sections, flowing onto more pages when long
-  const blocks = [];
-  SECTIONS.forEach((k) => {
-    const txt = k === 'final_diagnoses' ? [gpLine_(r), s_(r[k])].filter(Boolean).join('\n')
-      : k === 'physical_findings' ? s_(r[k]).split('\n').map((x) => x.trim().replace(/[.,;]+$/, '')).filter(Boolean).join(', ')   // short readings read better as one paragraph and keep the page to one sheet
-      : s_(r[k]);
-    blocks.push([colDef(k).label, txt]);
-    if (k === 'physical_findings') blocks.push(['Investigations', labsLine_(r)]);
-  });
-  blocks.forEach((bk) => {
-    const lines = wrap(bk[1] || '-', 10.5, CW - 8);
-    need(34);
-    const head = bk[0].toUpperCase();
-    T_(M, y, head, 11, true); lineH(M, y - 2, M + tw(pdfText(head), 11, true)); y -= 16;
-    lines.forEach((l) => { need(14); T_(M + 4, y, l, 10.5, false); y -= 13.5; });
-    y -= 10;
-  });
-  need(86); y -= 26;
+  // The details: two columns, medicines (with their Urdu wording) across the page, then the signature.
+  // The text size steps down from 10 to 8 pt only as far as needed to keep the summary on one page; longer ones flow onto more pages.
+  const text = (k) => (k === 'final_diagnoses' ? [gpLine_(r), s_(r[k])].filter(Boolean).join('\n')
+    : k === 'physical_findings' ? s_(r[k]).split('\n').map((x) => x.trim().replace(/[.,;]+$/, '')).filter(Boolean).join(', ')
+    : s_(r[k]));
+  const LEFT = [[colDef('final_diagnoses').label, text('final_diagnoses')], [colDef('history').label, text('history')], [colDef('physical_findings').label, text('physical_findings')], ['Investigations', labsLine_(r)]];
+  const RIGHT = [[colDef('course').label, text('course')], [colDef('follow_up').label, text('follow_up')]];
+  const urdu = (imgs && imgs.urdu) || [];
+  const meds = s_(r.discharge_meds).split('\n').map((l) => l.trim()).filter(Boolean).map((l, i) => ({ en: medEnglish_(l), ur: urdu[i] && urdu[i].bytes && urdu[i].bytes.length ? urdu[i] : null }));
+  const GAP = 18, C2 = (CW - GAP) / 2, ENW = CW * 0.56, URX = M + ENW + 10, URW = PW - M - URX, SIG = 84, FOOT = M - 6;                     // no footer: the page ends with the signature
+  const lhOf = (fs) => fs * 1.32;
+  const blockH = (bk, w, fs) => 15 + Math.max(1, wrap(bk[1] || '-', fs, w - 4).length) * lhOf(fs) + 8;
+  const urSize = (u, fs) => { const h = fs * 2.2, w = h * u.g.w / u.g.h; return w > URW ? { w: URW, h: URW * u.g.h / u.g.w } : { w, h }; };
+  const medRowH = (m, fs) => Math.max(wrap(m.en, fs, ENW).length * lhOf(fs), m.ur ? urSize(m.ur, fs).h + 3 : 0) + 3;
+  const medsH = (fs) => 15 + (meds.length ? meds.reduce((t, m) => t + medRowH(m, fs), 0) : lhOf(fs)) + 8;
+  const fit = [10, 9.5, 9, 8.5, 8].filter((fs) => Math.max(LEFT.reduce((t, b) => t + blockH(b, C2, fs), 0), RIGHT.reduce((t, b) => t + blockH(b, C2, fs), 0)) + medsH(fs) + SIG <= y - FOOT)[0];
+  const urNames = [];
+  const head = (x, yy, t, fs) => { const h = t.toUpperCase(); T_(x, yy, h, fs + 0.5, true); lineH(x, yy - 2, x + tw(pdfText(h), fs + 0.5, true)); };
+  const drawBlock = (x, w, bk, fs, flow) => {
+    if (flow) need(34);
+    head(x, y, bk[0], fs); y -= 15;
+    wrap(bk[1] || '-', fs, w - 4).forEach((l) => { if (flow) need(lhOf(fs) + 2); T_(x + 3, y, l, fs, false); y -= lhOf(fs); });
+    y -= 8;
+  };
+  const drawMeds = (fs, flow) => {
+    if (flow) need(40);
+    head(M, y, colDef('discharge_meds').label, fs); y -= 15;
+    if (!meds.length) { T_(M + 3, y, '-', fs, false); y -= lhOf(fs); }
+    meds.forEach((m) => {
+      const rh = medRowH(m, fs);
+      if (flow) need(rh + 2);
+      wrap(m.en, fs, ENW).forEach((l, i) => T_(M + 3, y - i * lhOf(fs), l, fs, false));
+      if (m.ur) {
+        const z = urSize(m.ur, fs), nm = 'U' + urNames.length; urNames.push({ nm, u: m.ur });
+        ops.push('q ' + z.w.toFixed(2) + ' 0 0 ' + z.h.toFixed(2) + ' ' + (PW - M - z.w).toFixed(2) + ' ' + (y - z.h + fs * 1.15).toFixed(2) + ' cm /' + nm + ' Do Q');
+      }
+      y -= rh;
+    });
+    y -= 8;
+  };
+  if (fit) {
+    const top = y;
+    LEFT.forEach((bk) => drawBlock(M, C2, bk, fit, false));
+    const yl = y; y = top;
+    ops.push('0.8 G ' + (M + C2 + GAP / 2).toFixed(2) + ' ' + (top + 6).toFixed(2) + ' m ' + (M + C2 + GAP / 2).toFixed(2) + ' ' + (Math.min(yl, top) + 4).toFixed(2) + ' l S 0 G');                                  // a faint rule between the columns
+    RIGHT.forEach((bk) => drawBlock(M + C2 + GAP, C2, bk, fit, false));
+    y = Math.min(yl, y);
+    drawMeds(fit, false);
+  } else {
+    LEFT.concat(RIGHT.slice(0, 1)).forEach((bk) => drawBlock(M, CW, bk, 9.5, true));
+    drawMeds(9.5, true);
+    drawBlock(M, CW, RIGHT[1], 9.5, true);
+  }
+  need(SIG); y -= 22;
   lineH(PW - M - 200, y, PW - M);
   T_(PW - M - 200, y - 12, 'Signature of Consultant', 9, true);
   if (r.consultant) {                                   // the consultant's details, printed once, here
@@ -904,8 +964,6 @@ function buildPdf(r, imgs) {
     if (doc && doc.phone) lines.push(['Ph: ' + doc.phone, false]);
     lines.forEach((l, i) => wrap(l[0], 9.5, 200, l[1]).forEach((t, j) => T_(sx, y - 24 - (i + j) * 12, t, 9.5, l[1])));
   }
-  const stamp = (final ? 'Final' : 'DRAFT, not final') + (r.finalised_by ? ' | finalised by ' + r.finalised_by + ' ' + s_(r.finalised_at) : '');
-  pages.forEach((p, i) => { const o = ops; ops = p; T_(M, 22, stamp, 7.5, false); T_(PW - M - 60, 22, 'Page ' + (i + 1) + ' of ' + pages.length, 7.5, false); ops = o; });
   // assemble the file
   const enc = new TextEncoder(), parts = [], offs = [];
   let len = 0;
@@ -915,10 +973,11 @@ function buildPdf(r, imgs) {
   const catalog = add(null), pagesObj = add(null), f1 = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>'), f2 = add('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>');
   const jpg = (g, b) => add(['<< /Type /XObject /Subtype /Image /Width ' + g.w + ' /Height ' + g.h + ' /ColorSpace /' + (g.n === 1 ? 'DeviceGray' : 'DeviceRGB') + ' /BitsPerComponent 8 /Filter /DCTDecode /Length ' + b.length + ' >>\nstream\n', b, '\nendstream']);
   const img = lg ? jpg(lg, logo) : 0, img2 = qg ? jpg(qg, qr) : 0;
+  const urObjs = urNames.map((x) => ' /' + x.nm + ' ' + jpg(x.u.g, x.u.bytes) + ' 0 R').join('');
   const kids = pages.map((p) => {
     const s = p.join('\n');
     const c = add('<< /Length ' + s.length + ' >>\nstream\n' + s + '\nendstream');
-    return add('<< /Type /Page /Parent ' + pagesObj + ' 0 R /MediaBox [0 0 ' + PW + ' ' + PH + '] /Resources << /Font << /F1 ' + f1 + ' 0 R /F2 ' + f2 + ' 0 R >>' + (img || img2 ? ' /XObject <<' + (img ? ' /Im1 ' + img + ' 0 R' : '') + (img2 ? ' /Im2 ' + img2 + ' 0 R' : '') + ' >>' : '') + ' >> /Contents ' + c + ' 0 R >>');
+    return add('<< /Type /Page /Parent ' + pagesObj + ' 0 R /MediaBox [0 0 ' + PW + ' ' + PH + '] /Resources << /Font << /F1 ' + f1 + ' 0 R /F2 ' + f2 + ' 0 R >>' + (img || img2 || urObjs ? ' /XObject <<' + (img ? ' /Im1 ' + img + ' 0 R' : '') + (img2 ? ' /Im2 ' + img2 + ' 0 R' : '') + urObjs + ' >>' : '') + ' >> /Contents ' + c + ' 0 R >>');
   });
   objs[catalog - 1] = '<< /Type /Catalog /Pages ' + pagesObj + ' 0 R >>';
   objs[pagesObj - 1] = '<< /Type /Pages /Kids [' + kids.map((k) => k + ' 0 R').join(' ') + '] /Count ' + kids.length + ' >>';
@@ -933,7 +992,7 @@ function buildPdf(r, imgs) {
 }
 async function sharePdf(r) {
   try {
-    const bytes = buildPdf(r, await pdfImages());
+    const bytes = buildPdf(r, await pdfImages(r));
     const name = ((r.ds_no || 'Draft') + ' ' + (r.name || 'summary')).replace(/[^\w .-]+/g, '').trim() + '.pdf';
     const file = new File([bytes], name, { type: 'application/pdf' });
     T.lastPdf = bytes;
