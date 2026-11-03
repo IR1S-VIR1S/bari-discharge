@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.0';
-const BUILD_ID = 'b488749773b6';
+const BUILD_ID = 'afadde769622';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -50,6 +50,7 @@ async function kv(mode, fn) { const db = await idb(); return new Promise((res, r
 const kvGet = (k) => kv('readonly', (s) => s.get(k));
 const kvSet = (k, v) => kv('readwrite', (s) => s.put(v, k));
 const kvClear = () => kv('readwrite', (s) => s.clear());
+const kvDel = (k) => kv('readwrite', (s) => s.delete(k));
 async function deriveKey(pin, salt) {
   const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: PBKDF2_ROUNDS, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
@@ -83,6 +84,87 @@ async function openVault(pin) {
   T.salt = vault.salt; KEY = key; S = JSON.parse(new TextDecoder().decode(pt));
   sessSave();
 }
+
+// ------------------------------------------------------------------ Face ID / fingerprint (from TBDM Field)
+// The PIN stays the master key. At set-up the unlocked vault key is encrypted under a key that the phone's own authenticator releases only after
+// a Face ID or fingerprint check (the WebAuthn PRF extension). Nothing the phone stores can open the vault without that check, and where the phone
+// cannot do this the option is not offered: a button that merely hides the PIN would be weaker than the PIN itself.
+function bioIcon() {
+  const b = el('span', { class: 'bioico', 'aria-hidden': 'true' });
+  b.innerHTML = '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 17V12a6 6 0 0 1 6-6h5M31 6h5a6 6 0 0 1 6 6v5M42 31v5a6 6 0 0 1-6 6h-5M17 42h-5a6 6 0 0 1-6-6v-5"/><path d="M17.5 19v3M30.5 19v3M24 19.5v6.5h-2.2M17.5 31.5c3.8 3.6 9.2 3.6 13 0"/></svg>';
+  return b;
+}
+const ANDROID = /Android/i.test(navigator.userAgent);
+async function bioAvailable() {
+  T.bioWhy = '';
+  if (!(window.PublicKeyCredential && navigator.credentials && navigator.credentials.create)) { T.bioWhy = 'WebAuthn: not in this browser'; return false; }
+  try {
+    let caps = null;
+    if (PublicKeyCredential.getClientCapabilities) { try { caps = await PublicKeyCredential.getClientCapabilities(); } catch (e) { caps = null; } }
+    const v = caps && caps.userVerifyingPlatformAuthenticator !== undefined ? !!caps.userVerifyingPlatformAuthenticator : await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+    const prf = caps ? caps['extension:prf'] : undefined;
+    T.bioWhy = 'built-in biometric: ' + (v ? 'yes' : 'no') + '; key release (PRF): ' + (prf === true ? 'yes' : prf === false ? 'no' : 'not reported');
+    if (!v && ANDROID) T.bioWhy += '. Set a screen lock with a fingerprint and sign in to a Google account on the phone';
+    if (prf === false) { T.bioWhy += '. This browser cannot release the key after a fingerprint check' + (ANDROID ? '; update Chrome and Google Play services' : ''); return false; }
+    return !!v;
+  } catch (e) { T.bioWhy = 'check failed (' + (e && e.name) + ')'; return false; }
+}
+async function bioWrapKey(prf) {
+  const base = await crypto.subtle.importKey('raw', prf, 'HKDF', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('bari pin wrap v1') }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+function prfOut(cred) { const x = cred && cred.getClientExtensionResults && cred.getClientExtensionResults(); return x && x.prf && x.prf.results && x.prf.results.first ? new Uint8Array(x.prf.results.first) : null; }
+const rnd = (n) => crypto.getRandomValues(new Uint8Array(n));
+async function bioAsk(id, prfSalt) {
+  const a = await navigator.credentials.get({ publicKey: { challenge: rnd(32), allowCredentials: [Object.assign({ type: 'public-key', id }, ANDROID ? {} : { transports: ['internal'] })], userVerification: 'required', hints: ['client-device'], timeout: 60000, extensions: { prf: { eval: { first: prfSalt } } } } });
+  return prfOut(a);
+}
+async function bioEnrol() {                               // called straight from a tap: phones allow Face ID only in answer to one
+  let step = 'start';
+  try {
+    if (!KEY) throw new Error('The app is locked.');
+    const raw = new Uint8Array(await crypto.subtle.exportKey('raw', KEY)), prfSalt = rnd(32);
+    step = 'passkey';
+    const cred = await navigator.credentials.create({ publicKey: { rp: { name: 'Bari Discharge' }, user: { id: rnd(16), name: S.cfg.email || 'user', displayName: S.cfg.name || 'user' }, challenge: rnd(32),
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }], authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: ANDROID ? 'required' : 'discouraged', requireResidentKey: ANDROID },
+      hints: ['client-device'], timeout: 60000, extensions: { prf: { eval: { first: prfSalt } } } } });
+    const id = new Uint8Array(cred.rawId);
+    step = 'secret';
+    const out = prfOut(cred) || await bioAsk(id, prfSalt);               // some phones give the secret only on the next check
+    if (!out) throw new Error('This phone or browser cannot lock the app to Face ID or fingerprint. Keep using the PIN.');
+    step = 'save';
+    const iv = rnd(12), ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await bioWrapKey(out), raw);
+    await kvSet('bio', { v: 2, id, prfSalt, iv, ct, salt: T.salt });
+    T.hasBio = true;
+  } catch (e) { if (e && !e.step) e.step = step; throw e; }
+}
+async function bioOpen() {
+  const b = await kvGet('bio');
+  if (!b || b.v !== 2) throw Object.assign(new Error('not set up'), { name: 'OperationError' });
+  const out = await bioAsk(b.id, b.prfSalt);
+  if (!out) throw new Error('The check did not release the key.');
+  const raw = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b.iv }, await bioWrapKey(out), b.ct);
+  const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', true, ['encrypt', 'decrypt']);
+  const vault = await kvGet('vault');
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: vault.iv }, key, vault.ct);
+  T.salt = vault.salt; KEY = key; S = JSON.parse(new TextDecoder().decode(pt));
+  if (!S.usage) S.usage = {};
+  sessSave();
+}
+async function bioTurnOn() {
+  try { await bioEnrol(); toast('Face ID or fingerprint is on'); }
+  catch (e) { toast(e && e.name === 'NotAllowedError' ? 'Cancelled, or the phone refused the check. Nothing was changed.' : 'Could not turn it on (' + (e && e.step ? e.step + ': ' : '') + (e && e.name) + ': ' + ((e && e.message) || '') + ')'); }
+  render();
+}
+const BIOASK = 'bari-bioask';
+function offerBio() {                                     // after a correct PIN, once: "Not now" is remembered
+  let declined = false; try { declined = localStorage.getItem(BIOASK) === 'no'; } catch (e) { /* ignore */ }
+  const wanted = T.bioWant; T.bioWant = false;
+  if (!KEY || T.hasBio || !T.bioOk || (declined && !wanted)) return;
+  modal('Open the app with Face ID or fingerprint?', el('p', null, 'Next time you can unlock without typing the PIN. The PIN keeps working as a back-up.'),
+    [['Not now', () => { try { localStorage.setItem(BIOASK, 'no'); } catch (e) { /* ignore */ } }], ['Set up', bioTurnOn, 'primary']]);
+}
+async function bioOff() { try { await kvDel('bio'); } catch (e) { /* ignore */ } T.hasBio = false; }
 
 // ------------------------------------------------------------------ records: the workbook's copy with this phone's unsent changes on top
 function serverRows() { return (S.server && S.server.rows) || []; }
@@ -157,7 +239,7 @@ async function sync() {
 
 // ------------------------------------------------------------------ locking and navigation
 function bumpIdle() { clearTimeout(T.idle); if (KEY) { T.idle = setTimeout(lock, IDLE_LOCK_MS); sessTouch(); } }
-function lock() { sessClear(); KEY = null; S = null; T.form = null; T.nav = []; T.pin = ''; T.q = ''; clearTimeout(T.idle); render(); applyUpdateIfSafe(); }
+function lock() { T.bioTried = false; sessClear(); KEY = null; S = null; T.form = null; T.nav = []; T.pin = ''; T.q = ''; clearTimeout(T.idle); render(); applyUpdateIfSafe(); }
 ['pointerdown', 'keydown'].forEach((ev) => document.addEventListener(ev, bumpIdle, { passive: true }));
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) T.hiddenAt = Date.now();
@@ -212,9 +294,44 @@ function syncBar() {
   return el('button', { class: 'sync' + (T.syncError || bad ? ' warn' : ''), type: 'button', id: 'sync-btn', title: T.syncError || '', onclick: () => sync() }, txt);
 }
 function paintSync() { const b = $('#syncbar'); if (b && S) b.replaceChildren(syncBar()); }
+const ICONS = {
+  home: '<path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+  records: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h7"/>',
+  buttons: '<rect x="3.5" y="3.5" width="7.5" height="7.5" rx="2"/><rect x="13" y="3.5" width="7.5" height="7.5" rx="2"/><rect x="3.5" y="13" width="7.5" height="7.5" rx="2"/><path d="M16.75 13.5v6.5M13.5 16.75H20"/>',
+  settings: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/>',
+  face: '<path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M9 9.5v1M15 9.5v1M12 9.5v3.5h-1M9.2 15.6a4 4 0 0 0 5.6 0"/>',
+  invite: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-6 6.5-6s5.9 2.4 6.5 6"/><path d="M18.5 8v6M15.5 11h6"/>',
+  update: '<path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5M4.5 16.5v2a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-2"/>',
+  name: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>'
+};
+const ICON_DETAIL = { records: [1], buttons: [3] };      // inner strokes that stay visible when the selected icon is filled
+function icon(k) {
+  const s = el('span', { class: 'ico', 'aria-hidden': 'true' });
+  s.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + ICONS[k] + '</svg>';
+  (ICON_DETAIL[k] || []).forEach((i) => { const c = s.querySelector('svg').children[i]; if (c) c.setAttribute('class', 'd'); });
+  return s;
+}
 function bottomNav(active) {
-  const tabs = [['home', 'Home'], ['list', 'Summaries']].concat(role() === 'pi' ? [['buttons', 'Buttons']] : []).concat([['settings', 'Settings']]);
-  return el('nav', { class: 'bar' }, tabs.map((t) => el('button', { class: active === t[0] ? 'on' : '', type: 'button', id: 'nav-' + t[0], onclick: () => tabTo(t[0]) }, t[1])));
+  const all = records(), bad = attention().length, drafts = all.filter((r) => r.status !== 'F').length;
+  const drafted = ((S.server && S.server.quick) || []).filter((q) => q.draft).length;
+  const tabs = [['home', 'Home', 'home'], ['list', 'Summaries', 'records']].concat(role() === 'pi' ? [['buttons', 'Buttons', 'buttons']] : []).concat([['settings', 'Settings', 'settings']]);
+  const badge = (id) => (id === 'home' && bad ? el('i', { class: 'badge', 'aria-label': bad + ' need attention' }, String(bad))
+    : id === 'list' && drafts ? el('i', { class: 'badge blue', 'aria-label': drafts + ' drafts' }, String(drafts))
+    : id === 'buttons' && drafted ? el('i', { class: 'badge amber', 'aria-label': drafted + ' draft buttons' }, String(drafted)) : null);
+  const nav = el('nav', { class: 'bnav', 'aria-label': 'Main' }, tabs.map((t) => el('button', { class: 'bn' + (t[0] === active ? ' on' : ''), type: 'button', id: 'nav-' + t[0], 'data-tab': t[0], 'aria-current': t[0] === active ? 'page' : null, onclick: () => tabTo(t[0]) },
+    icon(t[2]), badge(t[0]), el('span', { class: 'lbl' }, t[1]))));
+  // the top indicator slides from the tab that was selected to the new one (the bar is rebuilt on every screen, so its last place is remembered)
+  const slide = el('i', { class: 'slide', 'aria-hidden': 'true' }); nav.append(slide);
+  const place = (b) => { const w = b.offsetWidth; return { x: Math.round(b.offsetLeft + w * 0.22), w: Math.round(w * 0.56) }; };
+  queueMicrotask(() => {
+    const on = nav.querySelector('.bn.on'); if (!on) { slide.style.display = 'none'; return; }
+    const to = place(on), prev = T.navPos && T.navPos.id !== active ? T.navPos : null, from = prev && nav.querySelector('[data-tab="' + prev.id + '"]');
+    const set = (q) => { slide.style.width = q.w + 'px'; slide.style.transform = 'translateX(' + q.x + 'px)'; };
+    const calm = !(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+    if (from && calm) { set(place(from)); void slide.offsetWidth; slide.classList.add('go'); }
+    set(to); T.navPos = { id: active };
+  });
+  return nav;
 }
 
 // ------------------------------------------------------------------ setup and lock
@@ -277,7 +394,7 @@ function lockScreen() {
   const tryPin = async () => {
     if (T.pin.length < 6) { T.lockMsg = 'At least 6 digits.'; render(); return; }
     const pin = T.pin; T.pin = ''; T.lockMsg = 'Opening\u2026'; render();
-    try { await openVault(pin); localStorage.setItem('bari-fails', '0'); T.lockMsg = ''; T.nav = []; bumpIdle(); render(); sync(); }
+    try { await openVault(pin); localStorage.setItem('bari-fails', '0'); T.lockMsg = ''; T.nav = []; bumpIdle(); render(); sync(); offerBio(); }
     catch (e) {
       const f = fails + 1; localStorage.setItem('bari-fails', String(f));
       if (f >= 5) localStorage.setItem('bari-wait', String(Date.now() + Math.min(3600, Math.pow(2, f - 4) * 15) * 1000));
@@ -289,15 +406,28 @@ function lockScreen() {
     if (d === 'del') T.pin = T.pin.slice(0, -1); else if (d === 'ok') { tryPin(); return; } else if (T.pin.length < 12) T.pin += d;
     T.lockMsg = ''; render();
   };
+  const tryBio = async (auto) => {
+    if (T.bioBusy === 'asking') return;                     // one check at a time: a second request would make the phone ask twice
+    T.bioBusy = 'asking'; T.lockMsg = ''; if (!auto) render();
+    try { await bioOpen(); localStorage.setItem('bari-fails', '0'); T.lockMsg = ''; T.nav = []; bumpIdle(); render(); sync(); }
+    catch (e) {
+      if (e && e.name === 'OperationError') { await bioOff(); T.lockMsg = 'Face ID or fingerprint no longer matches. Use the PIN, then set it up again in Settings.'; }
+      else T.lockMsg = auto ? '' : e && e.name === 'NotAllowedError' ? 'Cancelled. Use the PIN, or try again.' : 'Face ID or fingerprint did not open the app. Use the PIN.';
+      render();
+    } finally { T.bioBusy = false; }
+  };
+  if (T.hasBio && !T.join && !T.bioTried && !(Date.now() < until)) { T.bioTried = true; T.bioBusy = 'waiting'; setTimeout(() => { if (!KEY && T.hasBio) tryBio(true); else T.bioBusy = false; }, 350); }
   const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'del', '0', 'ok'];
   return el('div', { class: 'lock' }, el('img', { class: 'logo', src: 'logo.jpg', alt: 'Bari Hospital' }),
     el('p', null, T.join ? 'An invitation was opened, but this phone is already set up. Unlock, then reset the phone in Settings to use it.' : 'Enter your PIN'),
     dots, el('div', { class: 'pad' }, keys.map((k) => el('button', { class: k.length > 1 ? 'txt' : '', type: 'button', 'aria-label': k === 'del' ? 'Delete' : k === 'ok' ? 'Unlock' : k, onclick: () => press(k) },
       k === 'del' ? 'Delete' : k === 'ok' ? 'Unlock' : k))), el('div', { class: 'err', role: 'alert' }, T.lockMsg || ''),
     el('button', { class: 'linkbtn', type: 'button', onclick: () => modal('Forgot your PIN?', el('p', null, 'The PIN cannot be recovered. Ask the PI for a new invitation, then reset this phone: summaries not yet sent from this phone are lost.'),
-      [['Cancel', null], ['Reset this phone', resetPhone, 'danger']]) }, 'Forgot PIN?'));
+      [['Cancel', null], ['Reset this phone', resetPhone, 'danger']]) }, 'Forgot PIN?'),
+    (T.hasBio || T.bioOk) && !T.join ? el('button', { class: 'bio', id: 'bio-unlock', type: 'button', 'aria-label': 'Unlock with Face ID or fingerprint', title: 'Face ID or fingerprint',
+      onclick: () => { if (T.hasBio) tryBio(false); else { T.bioWant = true; T.lockMsg = 'Type your PIN once. You will then be asked to set up Face ID or fingerprint.'; render(); } } }, bioIcon()) : null);
 }
-async function resetPhone() { await kvClear(); sessClear(); KEY = null; S = null; T.hasVault = false; T.nav = []; render(); }
+async function resetPhone() { await kvClear(); sessClear(); KEY = null; S = null; T.hasVault = false; T.hasBio = false; T.nav = []; render(); }
 
 // ------------------------------------------------------------------ home and lists
 function card(r) {
@@ -598,7 +728,14 @@ function saveTemplate(r) {
 
 // ------------------------------------------------------------------ settings and the PI's buttons screen
 function settingsScreen() {
-  const tile = (id, t, sub, fn) => el('button', { class: 'tile', type: 'button', id, onclick: fn }, el('b', null, t), el('span', null, sub));
+  const tile = (id, t, sub, fn, ic) => el('button', { class: 'tile', type: 'button', id, onclick: fn }, el('b', { class: 'tt' }, ic ? icon(ic) : null, t), el('span', null, sub));
+  const bioTile = () => {
+    if (T.hasBio) return tile('bio-off', 'Biometric', 'On: tap to turn off', () => modal('Turn off Face ID and fingerprint?', el('p', null, 'The app will open with the PIN only.'), [['Cancel', null], ['Turn off', async () => { await bioOff(); toast('Face ID and fingerprint unlock is off'); render(); }, 'primary']]), 'face');
+    if (T.bioOk === null) return tile('bio-wait', 'Biometric', 'Checking\u2026', null, 'face');
+    if (!T.bioOk) return tile('bio-na', 'Biometric', 'Not available', () => modal('Face ID / fingerprint', el('p', { id: 'bio-none' }, 'This phone does not report a built-in biometric for this app (' + (T.bioWhy || '') + '). The PIN works as normal.'),
+      window.PublicKeyCredential ? [['Close', null], ['Try to set it up anyway', () => { T.bioOk = true; bioTurnOn(); }, 'primary']] : [['Close', null]]), 'face');
+    return tile('bio-on', 'Biometric', 'Off: tap to turn on', bioTurnOn, 'face');
+  };
   return el('div', { class: 'page' }, topBar('Settings'), el('main', null,
     el('div', { class: 'card' }, el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Name'), el('span', { class: 'v' }, S.cfg.name)),
       el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Role'), el('span', { class: 'v' }, ROLE_NAMES[role()] || role())),
@@ -606,12 +743,13 @@ function settingsScreen() {
       el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Last sync'), el('span', { class: 'v' }, S.lastSync ? ago(S.lastSync) : 'never')),
       el('div', { class: 'kv' }, el('span', { class: 'k' }, 'App build'), el('span', { class: 'v' }, BUILD_ID))),
     el('div', { class: 'tiles' },
-      role() === 'pi' ? tile('t-invite', 'Invite', 'a consultant or medical officer', inviteDialog) : null,
-      tile('t-update', 'Update app', 'check for a newer version', updateApp),
+      role() === 'pi' ? tile('t-invite', 'Invite', 'a consultant or medical officer', inviteDialog, 'invite') : null,
+      bioTile(),
+      tile('t-update', 'Update app', 'check for a newer version', updateApp, 'update'),
       tile('t-name', 'My name', 'as printed on summaries', () => {
         const i = el('input', { type: 'text', id: 'my-name', value: S.cfg.name, maxlength: '60' });
         modal('Your name', i, [['Cancel', null], ['Save', () => { if (s_(i.value).length < 3) return false; S.cfg.name = s_(i.value); saveState(); render(); }, 'primary']]);
-      })),
+      }, 'name')),
     el('button', { class: 'btn danger block', type: 'button', id: 'reset', onclick: () => {
       const n = S.outbox.length;
       modal('Reset this phone?', el('p', null, n ? n + ' change(s) not yet sent will be lost. ' : '', 'You will need a new invitation.'), [['Cancel', null], ['Reset', resetPhone, 'danger']]);
@@ -807,7 +945,7 @@ async function sharePdf(r) {
 
 // ------------------------------------------------------------------ updates
 let updateReady = false;
-function applyUpdateIfSafe() { if (!updateReady || KEY || T.pin || T.join) return; location.reload(); }
+function applyUpdateIfSafe() { if (!updateReady || KEY || T.pin || T.join || T.bioBusy) return; location.reload(); }   // never while Face ID is asking: a reload would make it ask twice
 async function updateApp() {
   if (updateReady) { location.reload(); return; }
   try {
@@ -830,7 +968,8 @@ function setupAutoUpdate() {
 
 (async function start() {
   readJoin();
-  try { T.hasVault = !!(await kvGet('vault')); } catch (e) { T.hasVault = false; }
+  try { T.hasVault = !!(await kvGet('vault')); T.hasBio = T.hasVault && !!(await kvGet('bio')); } catch (e) { T.hasVault = false; T.hasBio = false; }
+  T.bioOk = null; bioAvailable().then((v) => { T.bioOk = v; if (!KEY && T.hasVault || cur().name === 'settings') render(); });
   if (T.hasVault) await sessRestore();
   if (S && !S.usage) S.usage = {};
   if ('serviceWorker' in navigator && location.protocol === 'https:') setupAutoUpdate();
