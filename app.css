@@ -161,3 +161,14 @@ main { padding: 12px; max-width: 720px; margin: 0 auto; }
 .bn .lbl { white-space: nowrap; }
 @media (max-width: 400px) { .bnav .bn .lbl { font-size: 10px; letter-spacing: -.01em; } }
 #cert-search { margin: 8px 0; }
+/* Moving bar tabs under Settings */
+.bn { touch-action: none; }
+.bn.lifting { opacity: .35; }
+body.dragging .bn#nav-settings { background: var(--chip); }
+.bn#nav-settings.over { background: var(--fin-tint); color: var(--link); box-shadow: inset 0 3px 0 var(--link); }
+.navghost { position: fixed; z-index: 40; transform: translate(-50%, -110%); display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 12px; border-radius: 14px; background: var(--card); color: var(--link); border: 1px solid var(--line); box-shadow: 0 8px 24px rgba(0,0,0,.22); pointer-events: none; font-size: 12px; font-weight: 600; }
+.navghost .ico, .navghost svg { width: 26px; height: 26px; display: block; }
+.badge.inline { position: static; display: inline-block; margin-left: 6px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #b3261e; color: #fff; font-style: normal; font-size: 11px; line-height: 18px; text-align: center; }
+.badge.inline.amber { background: #8a5a00; } .badge.inline.blue { background: #1e63a3; }
+.tiles.nested { margin: 0 0 8px; }
+.barrow { align-items: center; } .barrow .chips { margin-top: 0; }

@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.7';
-const BUILD_ID = '082fc6504880';
+const BUILD_ID = 'c0ab46641973';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -292,6 +292,7 @@ function render() {
 }
 function topBar(title, opts) {
   opts = opts || {};
+  if (!opts.back && T.nav.length && navNested().indexOf(cur().name) >= 0) opts.back = true;     // a tab moved under Settings opens with a way back
   return el('header', { class: 'top' }, opts.back ? el('button', { class: 'back', type: 'button', 'aria-label': 'Back', onclick: back }, '\u2039') : el('img', { class: 'mark', src: 'icon-192.png', alt: '' }),
     el('h1', null, title), el('div', { id: 'syncbar' }, syncBar()));
 }
@@ -323,17 +324,31 @@ function icon(k) {
   (ICON_DETAIL[k] || []).forEach((i) => { const c = s.querySelector('svg').children[i]; if (c) c.setAttribute('class', 'd'); });
   return s;
 }
+// The bar: Home and Settings stay; any other tab can be moved under Settings (press and hold it, drag it onto Settings) and put back from Settings.
+// Buttons lives under Settings unless moved back. The choice is kept on this phone.
+const NAV_FIXED = ['home', 'settings'];
+function navAll() { return [['home', 'Home', 'home'], ['list', 'Summaries', 'records'], ['fu', 'Follow-ups', 'calendar'], ['certs', 'Certificates', 'cert']].concat(role() === 'pi' ? [['buttons', 'Buttons', 'buttons']] : []).concat([['settings', 'Settings', 'settings']]); }
+function navNested() { const n = S && S.cfg && Array.isArray(S.cfg.nested) ? S.cfg.nested : ['buttons']; return n.filter((id) => NAV_FIXED.indexOf(id) < 0 && navAll().some((t) => t[0] === id)); }
+function setNested(list, msg) { S.cfg.nested = list; saveState(); render(); if (msg) toast(msg); }
+function navBadge(id) {
+  const all = records();
+  if (id === 'home') { const n = attention().length; return n ? [n, '', n + ' need attention'] : null; }
+  if (id === 'fu') { const n = fuOpen().filter((x) => x.st === 'missed' || x.st === 'overdue' || x.st === 'today').length; return n ? [n, '', n + ' follow-ups due'] : null; }
+  if (id === 'list') { const n = all.filter((r) => r.status !== 'F').length; return n ? [n, 'blue', n + ' drafts'] : null; }
+  if (id === 'buttons') { const n = ((S.server && S.server.quick) || []).filter((q) => q.draft).length; return n ? [n, 'amber', n + ' draft buttons'] : null; }
+  if (id === 'settings') { const b = navNested().map(navBadge).filter(Boolean); return b.length ? [b.reduce((t, x) => t + x[0], 0), b[0][1], 'inside Settings: ' + b.map((x) => x[2]).join(', ')] : null; }
+  return null;
+}
 function bottomNav(active) {
-  const all = records(), bad = attention().length, drafts = all.filter((r) => r.status !== 'F').length;
-  const drafted = ((S.server && S.server.quick) || []).filter((q) => q.draft).length;
-  const fuDue = fuOpen().filter((x) => x.st === 'missed' || x.st === 'overdue' || x.st === 'today').length;
-  const tabs = [['home', 'Home', 'home'], ['list', 'Summaries', 'records'], ['fu', 'Follow-ups', 'calendar'], ['certs', 'Certificates', 'cert']].concat(role() === 'pi' ? [['buttons', 'Buttons', 'buttons']] : []).concat([['settings', 'Settings', 'settings']]);
-  const badge = (id) => (id === 'home' && bad ? el('i', { class: 'badge', 'aria-label': bad + ' need attention' }, String(bad))
-    : id === 'fu' && fuDue ? el('i', { class: 'badge', 'aria-label': fuDue + ' follow-ups due' }, String(fuDue))
-    : id === 'list' && drafts ? el('i', { class: 'badge blue', 'aria-label': drafts + ' drafts' }, String(drafts))
-    : id === 'buttons' && drafted ? el('i', { class: 'badge amber', 'aria-label': drafted + ' draft buttons' }, String(drafted)) : null);
-  const nav = el('nav', { class: 'bnav', 'aria-label': 'Main' }, tabs.map((t) => el('button', { class: 'bn' + (t[0] === active ? ' on' : ''), type: 'button', id: 'nav-' + t[0], 'data-tab': t[0], 'aria-current': t[0] === active ? 'page' : null, onclick: () => tabTo(t[0]) },
-    icon(t[2]), badge(t[0]), el('span', { class: 'lbl' }, t[1]))));
+  const nested = navNested(), shown = navAll().filter((t) => nested.indexOf(t[0]) < 0);
+  if (nested.indexOf(active) >= 0) active = 'settings';
+  const badge = (id) => { const b = navBadge(id); return b ? el('i', { class: 'badge' + (b[1] ? ' ' + b[1] : ''), 'aria-label': b[2] }, String(b[0])) : null; };
+  const nav = el('nav', { class: 'bnav', 'aria-label': 'Main' }, shown.map((t) => {
+    const b = el('button', { class: 'bn' + (t[0] === active ? ' on' : ''), type: 'button', id: 'nav-' + t[0], 'data-tab': t[0], 'aria-current': t[0] === active ? 'page' : null,
+      onclick: () => { if (T.noClick) { T.noClick = false; return; } tabTo(t[0]); } }, icon(t[2]), badge(t[0]), el('span', { class: 'lbl' }, t[1]));
+    if (NAV_FIXED.indexOf(t[0]) < 0) dragToSettings(b, t[0], t[1]);
+    return b;
+  }));
   // the top indicator slides from the tab that was selected to the new one (the bar is rebuilt on every screen, so its last place is remembered)
   const slide = el('i', { class: 'slide', 'aria-hidden': 'true' }); nav.append(slide);
   const place = (b) => { const w = b.offsetWidth; return { x: Math.round(b.offsetLeft + w * 0.22), w: Math.round(w * 0.56) }; };
@@ -349,6 +364,40 @@ function bottomNav(active) {
 }
 
 // ------------------------------------------------------------------ setup and lock
+// Press and hold a tab (0.45 s), then drag it onto Settings. A tap still opens the tab; a small slip before the hold cancels the drag.
+function dragToSettings(btn, id, label) {
+  let timer = null, ghost = null, sx = 0, sy = 0, pid = null;
+  const target = () => $('#nav-settings');
+  const over = (x, y) => { const t = target(); if (!t) return false; const r = t.getBoundingClientRect(); return x >= r.left && x <= r.right && y >= r.top - 30 && y <= r.bottom; };
+  const end = () => { clearTimeout(timer); timer = null; if (ghost) ghost.remove(); ghost = null; btn.classList.remove('lifting'); document.body.classList.remove('dragging'); const t = target(); if (t) t.classList.remove('over'); };
+  btn.addEventListener('pointerdown', (e) => {
+    sx = e.clientX; sy = e.clientY; pid = e.pointerId;
+    timer = setTimeout(() => {
+      timer = null;
+      ghost = el('div', { class: 'navghost', 'aria-hidden': 'true' }, icon(btn.querySelector('.ico') ? navAll().filter((t) => t[0] === id)[0][2] : 'home'), el('span', null, label));
+      document.body.append(ghost); ghost.style.left = sx + 'px'; ghost.style.top = sy + 'px';
+      btn.classList.add('lifting'); document.body.classList.add('dragging');
+      try { btn.setPointerCapture(pid); } catch (x) { /* not all browsers */ }
+      if (navigator.vibrate) navigator.vibrate(15);
+    }, 450);
+  });
+  btn.addEventListener('pointermove', (e) => {
+    if (timer && Math.hypot(e.clientX - sx, e.clientY - sy) > 10) { clearTimeout(timer); timer = null; }
+    if (!ghost) return;
+    ghost.style.left = e.clientX + 'px'; ghost.style.top = e.clientY + 'px';
+    const t = target(); if (t) t.classList.toggle('over', over(e.clientX, e.clientY));
+  });
+  btn.addEventListener('pointerup', (e) => {
+    const dragging = !!ghost, hit = dragging && over(e.clientX, e.clientY);
+    end();
+    if (!dragging) return;
+    T.noClick = true; setTimeout(() => { T.noClick = false; }, 400);
+    if (hit) setNested(navNested().concat([id]), label + ' moved to Settings. Put it back from Settings.');
+    else toast('Drop it on Settings to move it there.');
+  });
+  btn.addEventListener('pointercancel', end);
+  btn.addEventListener('contextmenu', (e) => e.preventDefault());
+}
 function readJoin(given) {
   const h = given || location.hash;
   if (h.indexOf('#join=') !== 0) return false;
@@ -1142,6 +1191,15 @@ function settingsScreen() {
       el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Account'), el('span', { class: 'v' }, S.cfg.email)),
       el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Last sync'), el('span', { class: 'v' }, S.lastSync ? ago(S.lastSync) : 'never')),
       el('div', { class: 'kv' }, el('span', { class: 'k' }, 'App build'), el('span', { class: 'v' }, BUILD_ID))),
+    (() => {
+      const nested = navNested(), all = navAll().filter((t) => NAV_FIXED.indexOf(t[0]) < 0);
+      return el('section', { class: 'card', id: 'set-bar' }, el('h2', null, 'Bottom bar'),
+        nested.length ? el('div', { class: 'tiles nested' }, nested.map((id) => { const t = navAll().filter((x) => x[0] === id)[0], b = navBadge(id);
+          return el('button', { class: 'tile', type: 'button', id: 'set-' + id, onclick: () => go(id) }, el('b', { class: 'tt' }, icon(t[2]), t[1], b ? el('i', { class: 'badge inline' + (b[1] ? ' ' + b[1] : '') }, String(b[0])) : null), el('span', null, 'moved here from the bar')); })) : null,
+        el('p', { class: 'small muted' }, 'Press and hold a button in the bar, then drag it onto Settings to keep it here instead. Home and Settings always stay in the bar.'),
+        all.map((t) => el('div', { class: 'kv barrow' }, el('span', { class: 'k' }, t[1]), el('span', { class: 'v' }, chipRow('bar-' + t[0], [['bar', 'In the bar'], ['set', 'In Settings']], nested.indexOf(t[0]) >= 0 ? 'set' : 'bar',
+          (x) => { if (!x) { render(); return; } const now = navNested().filter((y) => y !== t[0]); if (x === 'set') now.push(t[0]); setNested(now, x === 'set' ? t[1] + ' moved to Settings' : t[1] + ' is back in the bar'); })))));
+    })(),
     el('div', { class: 'tiles' },
       role() === 'pi' ? tile('t-invite', 'Invite', 'a consultant or medical officer', inviteDialog, 'invite') : null,
       bioTile(),
