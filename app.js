@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.7';
-const BUILD_ID = '7fd8485707a4';
+const BUILD_ID = '082fc6504880';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
