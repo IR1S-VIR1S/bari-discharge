@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.4';
-const BUILD_ID = '65a6952e1826';
+const BUILD_ID = '1940fdb86583';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -278,7 +278,7 @@ function render() {
   else {
     const c = cur();
     page = c.name === 'form' ? formScreen(c.p) : c.name === 'view' ? viewScreen(c.p) : c.name === 'list' ? listScreen() : c.name === 'settings' ? settingsScreen()
-      : c.name === 'buttons' ? buttonsScreen() : c.name === 'fu' ? fuScreen() : c.name === 'cert' ? certScreen(c.p) : homeScreen();
+      : c.name === 'buttons' ? buttonsScreen() : c.name === 'fu' ? fuScreen() : c.name === 'cert' ? certScreen(c.p) : c.name === 'certs' ? certsScreen() : homeScreen();
   }
   app.replaceChildren(page);
 }
@@ -305,9 +305,10 @@ const ICONS = {
   name: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
   calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4M8 14h2M14 14h2M8 17.5h2"/>',
   phone: '<path d="M6.5 3.5h3l1.5 4-2 1.5a11 11 0 0 0 6 6l1.5-2 4 1.5v3a2 2 0 0 1-2 2A16.5 16.5 0 0 1 4.5 5.5a2 2 0 0 1 2-2z"/>',
-  chat: '<path d="M4 19.5 5.3 16A8 8 0 1 1 8 18.7z"/><path d="M9 10.5h6M9 13.5h4"/>'
+  chat: '<path d="M4 19.5 5.3 16A8 8 0 1 1 8 18.7z"/><path d="M9 10.5h6M9 13.5h4"/>',
+  cert: '<path d="M5 3.5h10l4 4v13H5z"/><path d="M8 9h6M8 12h8"/><circle cx="14.5" cy="16" r="2.3"/><path d="m13.3 18-.8 3.2 2-1 2 1-.8-3.2"/>'
 };
-const ICON_DETAIL = { records: [1], buttons: [3], calendar: [1] };      // inner strokes that stay visible when the selected icon is filled
+const ICON_DETAIL = { records: [1], buttons: [3], calendar: [1], cert: [1, 2] };      // inner strokes that stay visible when the selected icon is filled
 function icon(k) {
   const s = el('span', { class: 'ico', 'aria-hidden': 'true' });
   s.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + ICONS[k] + '</svg>';
@@ -318,7 +319,7 @@ function bottomNav(active) {
   const all = records(), bad = attention().length, drafts = all.filter((r) => r.status !== 'F').length;
   const drafted = ((S.server && S.server.quick) || []).filter((q) => q.draft).length;
   const fuDue = fuOpen().filter((x) => x.st === 'missed' || x.st === 'overdue' || x.st === 'today').length;
-  const tabs = [['home', 'Home', 'home'], ['list', 'Summaries', 'records'], ['fu', 'Follow-ups', 'calendar']].concat(role() === 'pi' ? [['buttons', 'Buttons', 'buttons']] : []).concat([['settings', 'Settings', 'settings']]);
+  const tabs = [['home', 'Home', 'home'], ['list', 'Summaries', 'records'], ['fu', 'Follow-ups', 'calendar'], ['certs', 'Certificates', 'cert']].concat(role() === 'pi' ? [['buttons', 'Buttons', 'buttons']] : []).concat([['settings', 'Settings', 'settings']]);
   const badge = (id) => (id === 'home' && bad ? el('i', { class: 'badge', 'aria-label': bad + ' need attention' }, String(bad))
     : id === 'fu' && fuDue ? el('i', { class: 'badge', 'aria-label': fuDue + ' follow-ups due' }, String(fuDue))
     : id === 'list' && drafts ? el('i', { class: 'badge blue', 'aria-label': drafts + ' drafts' }, String(drafts))
@@ -924,10 +925,10 @@ function fuSheet(uid) {
 // Issued by a consultant from a final summary, online, once. The workbook copies the patient's details from the summary, numbers the
 // certificate and gives it a verification code; a wrong certificate is withdrawn (with a reason) and a new one issued, never edited.
 function certsOf(uid) { return ((S.server && S.server.certs) || []).filter((c) => c.ds_uid === uid).sort((a, b) => (b.cert_no || '').localeCompare(a.cert_no || '')); }
-function certLine(c) {
+function certLine(c, who) {
   const t = codeLabel2_(CTYPES, c.ctype), per = c.ctype === 'F' ? 'from ' + dmy(c.from_date) : dmy(c.from_date) + ' to ' + dmy(c.to_date) + ' (' + certDays_(c) + ' days)';
   return el('div', { class: 'certrow' + (c.status === 'W' ? ' gone' : ''), 'data-cert': c.cert_no },
-    el('div', { class: 'main' }, el('b', null, c.cert_no + '  ' + t), el('div', { class: 'small muted' }, per + (c.ctype === 'A' ? ' | ' + c.attendant : '') + (c.status === 'W' ? ' | withdrawn: ' + c.withdraw_reason : ''))),
+    el('div', { class: 'main' }, el('b', null, c.cert_no + '  ' + t), who ? el('div', null, (c.title ? c.title + ' ' : '') + c.patient + (c.ds_no ? ' (' + c.ds_no + ')' : ' (walk-in)')) : null, el('div', { class: 'small muted' }, 'Issued ' + dmy(c.issued_on) + ' | ' + per + (c.ctype === 'A' ? ' | ' + c.attendant : '') + (c.status === 'W' ? ' | withdrawn: ' + c.withdraw_reason : ''))),
     el('button', { class: 'chip', type: 'button', onclick: () => shareCert(c) }, 'PDF'),
     c.status !== 'W' && can('certify') ? el('button', { class: 'chip', type: 'button', onclick: () => withdrawCert(c) }, 'Withdraw') : null);
 }
@@ -963,15 +964,24 @@ function withdrawCert(c) {
     }).catch((e) => toast('Not withdrawn: ' + e.message));
   }, 'danger']]);
 }
+// One form for both: from a final summary (p.uid: the patient's details come from the summary) or for a walk-in patient (p.walk: typed here).
 function certScreen(p) {
-  const r = record(p.uid);
-  if (!r || r.status !== 'F') return el('div', { class: 'page' }, topBar('Certificate', { back: true }), el('main', null, el('p', null, 'Certificates are issued from final summaries.')));
-  if (!T.cert || T.cert.uid !== p.uid) T.cert = { uid: p.uid, cuid: rid(), v: { ctype: 'R', purpose: 'W', from_date: s_(r.admit_date), to_date: '', exam_date: s_(r.discharge_date), show_dx: 'N', dx: s_(r.final_diagnoses).split('\n')[0], advice: '', attendant: s_(r.father_husband), relation: 'Husband', addressed_to: '' } };
-  const v = T.cert.v, today = dayIso(0), adm = s_(r.admit_date), dis = s_(r.discharge_date), birth = /deliver|caesarean|birth/i.test(s_(r.final_diagnoses) + ' ' + s_(r.course)) ? s_(r.op_date) : '';
+  const walk = !!p.walk, r = walk ? null : record(p.uid);
+  if (!walk && (!r || r.status !== 'F')) return el('div', { class: 'page' }, topBar('Certificate', { back: true }), el('main', null, el('p', null, 'Certificates are issued from final summaries.')));
+  if (!can('certify')) return el('div', { class: 'page' }, topBar('Certificate', { back: true }), el('main', null, el('p', null, 'Only a consultant can issue certificates.')));
+  const key = walk ? 'walk-in' : p.uid, today = dayIso(0);
+  if (!T.cert || T.cert.key !== key) {
+    const mine = ((S.server && S.server.staff) || []).filter((x) => x.role === 'consultant' && normName(x.name) === normName(S.cfg.name))[0];
+    T.cert = { key, cuid: rid(), v: walk
+      ? { ctype: 'R', purpose: 'W', title: 'Mrs', patient: '', guardian: '', age: '', exam_date: today, from_date: today, to_date: '', show_dx: 'N', dx: '', advice: '', addressed_to: '', birth_date: '', doctor: mine ? mine.name : '' }
+      : { ctype: 'R', purpose: 'W', from_date: s_(r.admit_date), to_date: '', exam_date: s_(r.discharge_date), show_dx: 'N', dx: s_(r.final_diagnoses).split('\n')[0], advice: '', attendant: s_(r.father_husband), relation: 'Husband', addressed_to: '' } };
+  }
+  const v = T.cert.v, adm = walk ? '' : s_(r.admit_date), dis = walk ? '' : s_(r.discharge_date);
+  const birth = walk ? s_(v.birth_date) : /deliver|caesarean|birth/i.test(s_(r.final_diagnoses) + ' ' + s_(r.course)) ? s_(r.op_date) : '';
   const again = () => { const yy = window.scrollY; render(); window.scrollTo(0, yy); };
   const preview = el('div', { class: 'certprev', id: 'cert-prev' }), msg = el('div', { class: 'msg', id: 'cert-msg' });
-  const draft = () => Object.assign({ cert_no: 'MC-new', patient: r.name, title: code_(r.marital) === 'S' ? 'Ms' : 'Mrs', guardian: r.father_husband, age: r.age, admit_date: adm, discharge_date: dis, birth_date: birth, issued_on: today, doctor: r.consultant }, v,
-    v.ctype === 'F' ? { to_date: v.from_date } : {}, v.ctype === 'A' ? { show_dx: 'N', advice: '' } : {});
+  const draft = () => Object.assign(walk ? { cert_no: 'MC-new', ds_uid: '', issued_on: today } : { cert_no: 'MC-new', ds_uid: r.uid, patient: r.name, title: code_(r.marital) === 'S' ? 'Ms' : 'Mrs', guardian: r.father_husband, age: r.age, admit_date: adm, discharge_date: dis, birth_date: birth, issued_on: today, doctor: r.consultant }, v,
+    v.ctype === 'F' ? { to_date: v.from_date } : {}, v.ctype === 'A' ? { show_dx: 'N', advice: '' } : {}, walk && v.ctype !== 'M' ? { birth_date: '' } : {});
   function paintCert() { const c = draft(), bad = certProblems_(c); preview.replaceChildren(...certText_(c).map((t) => el('p', null, t))); msg.textContent = bad ? 'To issue: ' + bad : ''; }
   const set = (k, x, redraw) => { v[k] = x; if (redraw) again(); else paintCert(); };
   paintCert();
@@ -980,28 +990,42 @@ function certScreen(p) {
     i.addEventListener('input', () => set(k, i.value));
     return el('div', { class: 'field' }, el('label', { class: 'lab', for: 'c-' + k }, label), i, el('div', { class: 'chips' }, chips.filter((c) => c[1]).map((c) => el('button', { class: 'chip', type: 'button', onclick: () => { i.value = c[1]; set(k, c[1]); } }, c[0]))));
   };
-  const span = (days) => el('div', { class: 'chips', id: 'c-span' }, days.map((n) => el('button', { class: 'chip', type: 'button', onclick: () => { if (dayNo_(v.from_date) === null) { toast('Choose the first day'); return; } set('to_date', addDays_(v.from_date, n - 1), true); } }, n + ' days')));
-  const input = (k, id, o) => { const i = el(o.area ? 'textarea' : 'input', Object.assign({ id, value: v[k] || '' }, o.area ? { rows: '2' } : { type: 'text', maxlength: o.max || '120' }, o.ph ? { placeholder: o.ph } : {}, o.cap ? { autocapitalize: o.cap } : {})); i.addEventListener('input', () => set(k, i.value)); return i; };
-  const t = v.ctype, M0 = [['Date of admission', adm], ['Date of operation', s_(r.op_date)], ['Date of discharge', dis], ['Today', today]];
-  const para = +s_(r.para) || 0;
-  return el('div', { class: 'page form' }, topBar('Issue a certificate', { back: true }), el('main', null,
-    el('div', { class: 'card' }, el('div', { class: 'small muted' }, r.ds_no + ' | ' + r.name + ' | admitted ' + dmy(adm) + ', discharged ' + dmy(dis)),
-      el('div', { class: 'lab' }, 'Kind of certificate'), chipRow('ctype', CTYPES, t, (x) => set('ctype', x || 'R', true)),
+  const span = (days) => el('div', { class: 'chips', id: 'c-span' }, days.map((n) => el('button', { class: 'chip', type: 'button', onclick: () => { if (dayNo_(v.from_date) === null) { toast('Choose the first day'); return; } set('to_date', addDays_(v.from_date, n - 1), true); } }, n + (n === 1 ? ' day' : ' days'))));
+  const input = (k, id, o) => { const i = el(o.area ? 'textarea' : 'input', Object.assign({ id, value: v[k] || '' }, o.area ? { rows: '2' } : { type: 'text', maxlength: o.max || '120' }, o.ph ? { placeholder: o.ph } : {}, o.cap ? { autocapitalize: o.cap } : {}, o.mode ? { inputmode: o.mode } : {})); i.addEventListener('input', () => set(k, i.value)); return i; };
+  const t = v.ctype, male = /^(Mr|Master)$/.test(v.title || ''), she = male ? 'he' : 'she';
+  const kinds = walk ? CTYPES.filter((x) => x[0] !== 'A' && !(male && x[0] === 'M')) : CTYPES;
+  const exam = s_(v.exam_date) || today;
+  const starts = walk ? [['Day of examination', exam], ['Day before', addDays_(exam, -1)], ['2 days before', addDays_(exam, -2)]] : [['Date of admission', adm], ['Date of operation', s_(r.op_date)], ['Date of discharge', dis], ['Today', today]];
+  const para = walk ? 0 : +s_(r.para) || 0;
+  const consultants = ((S.server && S.server.staff) || []).filter((x) => x.role === 'consultant');
+  return el('div', { class: 'page form' }, topBar(walk ? 'Walk-in certificate' : 'Issue a certificate', { back: true }), el('main', null,
+    walk ? el('div', { class: 'card', id: 'c-patient' }, el('h2', null, 'Patient'),
+      el('div', { class: 'lab' }, 'Title'), chipRow('title', TITLES.map((x) => [x, x]), v.title, (x) => { v.title = x || 'Mrs'; if (/^(Mr|Master)$/.test(v.title) && v.ctype === 'M') v.ctype = 'R'; again(); }),
+      el('label', { class: 'lab', for: 'c-name' }, 'Name'), input('patient', 'c-name', { max: '60', cap: 'words', ph: 'as on her or his ID card or school record' }),
+      el('label', { class: 'lab', for: 'c-guard' }, male || /^(Ms|Miss)$/.test(v.title) ? 'Father’s name' : 'Husband’s name'), input('guardian', 'c-guard', { max: '60', cap: 'words' }),
+      el('label', { class: 'lab', for: 'c-age' }, 'Age'), input('age', 'c-age', { max: '12', mode: 'numeric', ph: 'years' }),
+      el('div', { class: 'lab' }, 'Consultant'), chipRow('doctor', consultants.map((x) => [x.name, x.name]), v.doctor, (x) => set('doctor', x || v.doctor, true)),
+      date('exam_date', 'Date of examination', [['Today', today], ['Yesterday', addDays_(today, -1)]]))
+      : null,
+    el('div', { class: 'card' }, walk ? null : el('div', { class: 'small muted' }, r.ds_no + ' | ' + r.name + ' | admitted ' + dmy(adm) + ', discharged ' + dmy(dis)),
+      el('div', { class: 'lab' }, 'Kind of certificate'), chipRow('ctype', kinds, t, (x) => set('ctype', x || 'R', true)),
       el('div', { class: 'lab' }, 'For'), chipRow('purpose', PURPOSES, v.purpose, (x) => set('purpose', x || 'W')),
       el('label', { class: 'lab', for: 'c-to' }, 'Addressed to (optional)'), input('addressed_to', 'c-to', { ph: 'e.g. The Principal, ABC School. Blank: To whom it may concern' })),
     t === 'A' ? el('div', { class: 'card' }, el('label', { class: 'lab', for: 'c-att' }, 'Attendant’s name'), input('attendant', 'c-att', { max: '60', cap: 'words' }),
       el('div', { class: 'lab' }, 'Relation to the patient'), chipRow('rel', RELATIONS.map((x) => [x, x]), v.relation, (x) => set('relation', x))) : null,
     el('div', { class: 'card' },
-      t === 'F' ? date('from_date', 'Fit to resume from', [['Day after discharge', addDays_(dis, 1)], ['Today', today], ['In 2 weeks', addDays_(today, 14)], ['6 weeks after the birth', birth ? addDays_(birth, 42) : '']])
-        : [date('from_date', 'First day', t === 'A' ? M0.slice(0, 1) : M0), date('to_date', 'Last day', t === 'A' ? [['Date of discharge', dis]] : []),
-          t === 'R' ? span([3, 7, 10, 14, 21, 42]) : t === 'M' ? el('div', null, span([84, 90, 120, 180]), el('div', { class: 'hint' }, 'The federal Maternity and Paternity Leave Act 2023 gives 180, 120 or 90 days for a first, second or third birth (here Para ' + (para || '?') + '); most provincial employers give 12 weeks (84 days). Check what her employer follows.')) : null],
-      t !== 'A' ? date('exam_date', 'Date she was examined', [['Date of discharge', dis], ['Today', today]]) : null),
+      t === 'F' ? date('from_date', 'Fit to resume from', walk ? [['Today', today], ['Tomorrow', addDays_(today, 1)], ['In 1 week', addDays_(today, 7)]] : [['Day after discharge', addDays_(dis, 1)], ['Today', today], ['In 2 weeks', addDays_(today, 14)], ['6 weeks after the birth', birth ? addDays_(birth, 42) : '']])
+        : [date('from_date', 'First day', t === 'A' ? starts.slice(0, 1) : starts), date('to_date', 'Last day', t === 'A' ? [['Date of discharge', dis]] : []),
+          t === 'R' ? span([1, 2, 3, 5, 7, 10, 14, 21]) : t === 'M' ? el('div', null, span([84, 90, 120, 180]), el('div', { class: 'hint' }, 'The federal Maternity and Paternity Leave Act 2023 gives 180, 120 or 90 days for a first, second or third birth' + (para ? ' (here Para ' + para + ')' : '') + '; most provincial employers give 12 weeks (84 days). Check what her employer follows.')) : null,
+          walk ? el('div', { class: 'hint' }, 'A walk-in certificate may start at most ' + WALKIN_BEFORE + ' days before the examination, from the history ' + she + ' gives.') : null],
+      walk && t === 'M' ? date('birth_date', 'Date she gave birth (blank if not yet)', [['Today', today], ['Yesterday', addDays_(today, -1)]]) : null,
+      t !== 'A' && !walk ? date('exam_date', 'Date she was examined', [['Date of discharge', dis], ['Today', today]]) : null),
     t !== 'A' ? el('div', { class: 'card' }, el('div', { class: 'lab' }, 'Diagnosis'),
-      el('button', { class: 'chip box' + (v.show_dx === 'Y' ? ' on' : ''), type: 'button', id: 'c-dx-ok', role: 'checkbox', 'aria-checked': v.show_dx === 'Y' ? 'true' : 'false', onclick: () => set('show_dx', v.show_dx === 'Y' ? 'N' : 'Y', true) }, (v.show_dx === 'Y' ? '☑' : '☐') + ' She agrees to show the diagnosis'),
-      el('div', { class: 'hint' }, 'Without her agreement the certificate says "a medical condition". Employers and schools do not need the diagnosis.'),
+      el('button', { class: 'chip box' + (v.show_dx === 'Y' ? ' on' : ''), type: 'button', id: 'c-dx-ok', role: 'checkbox', 'aria-checked': v.show_dx === 'Y' ? 'true' : 'false', onclick: () => set('show_dx', v.show_dx === 'Y' ? 'N' : 'Y', true) }, (v.show_dx === 'Y' ? '☑' : '☐') + ' The patient agrees to show the diagnosis'),
+      el('div', { class: 'hint' }, 'Without agreement the certificate says "a medical condition". Employers and schools do not need the diagnosis.'),
       v.show_dx === 'Y' ? input('dx', 'c-dx', { max: '200' }) : null) : null,
     t !== 'A' ? el('div', { class: 'card' }, el('label', { class: 'lab', for: 'c-adv' }, 'Advice for the employer or school (optional)'), input('advice', 'c-adv', { area: true }),
-      el('div', { class: 'chips' }, CERT_ADVICE.map((x) => el('button', { class: 'chip q', type: 'button', onclick: () => set('advice', (s_(v.advice) ? s_(v.advice) + '\n' : '') + x, true) }, x)))) : null,
+      el('div', { class: 'chips' }, CERT_ADVICE.filter((x) => !(male && /Breastfeeding/.test(x))).map((x) => el('button', { class: 'chip q', type: 'button', onclick: () => set('advice', (s_(v.advice) ? s_(v.advice) + '\n' : '') + x, true) }, x)))) : null,
     el('section', { class: 'card' }, el('h2', null, 'It will read'), preview, msg)),
     el('div', { class: 'actbar' }, el('button', { class: 'btn primary', type: 'button', id: 'cert-issue', onclick: () => {
       const c = draft(), bad = certProblems_(c);
@@ -1009,7 +1033,8 @@ function certScreen(p) {
       if (!navigator.onLine) { toast('Issuing a certificate needs a signal: the workbook numbers it.'); return; }
       modal('Issue this certificate?', el('p', null, 'It is numbered and signed in the consultant’s name, and cannot be edited afterwards. A mistake is withdrawn and a new certificate issued.'), [['Cancel', null], ['Issue', () => {
         const btn = $('#cert-issue'); if (btn) { btn.disabled = true; btn.textContent = 'Issuing…'; }
-        api({ op: 'cert_issue', token: S.cfg.token, cuid: T.cert.cuid, values: Object.assign({ ds_uid: r.uid }, v), by: S.cfg.name }).then(async (x) => {
+        const vals = Object.assign({ ds_uid: walk ? '' : r.uid }, v, walk && t !== 'M' ? { birth_date: '' } : {});
+        api({ op: 'cert_issue', token: S.cfg.token, cuid: T.cert.cuid, values: vals, by: S.cfg.name }).then(async (x) => {
           if (!x.ok) { toast(x.error); render(); return; }
           S.server.certs = (S.server.certs || []).filter((y) => y.cert_no !== x.cert.cert_no).concat([x.cert]);
           await saveState(); T.cert = null; T.nav.pop(); render(); toast(x.cert.cert_no + ' issued');
@@ -1017,6 +1042,22 @@ function certScreen(p) {
         }).catch((e) => { toast('Not issued: ' + e.message); render(); });
       }, 'primary']]);
     } }, 'Issue certificate')));
+}
+// The Certificates tab: every certificate on this phone, newest first, and the walk-in button.
+function certsScreen() {
+  const all = ((S.server && S.server.certs) || []).slice().sort((a, b) => (b.cert_no || '').localeCompare(a.cert_no || ''));
+  const box = el('input', { type: 'search', id: 'cert-search', placeholder: 'Search name, MC number or code', value: T.cq || '', autocomplete: 'off' });
+  box.addEventListener('input', () => { T.cq = box.value; const list = $('#cert-list'); if (list) list.replaceWith(certList()); });
+  function certList() {
+    const qq = s_(T.cq).toLowerCase(), code = qq.length >= 9 && /^[0-9a-f-]+$/.test(qq) ? qq.replace(/-/g, '') : '';
+    const h = qq.length < 2 ? all : all.filter((c) => (c.patient + ' ' + c.guardian + ' ' + c.cert_no + ' ' + c.ds_no).toLowerCase().indexOf(qq) >= 0 || (code && s_(c.vcode).indexOf(code) === 0));
+    return el('section', { class: 'card', id: 'cert-list' }, el('h2', null, (qq.length < 2 ? 'Issued (' : 'Found (') + h.length + ')'),
+      h.length ? h.map((c) => certLine(c, true)) : el('p', { class: 'muted small' }, all.length ? 'None match.' : 'No certificates yet.'));
+  }
+  return el('div', { class: 'page' }, topBar('Certificates'), el('main', null,
+    can('certify') ? el('button', { class: 'btn big primary block', type: 'button', id: 'cert-walkin', onclick: () => go('cert', { walk: true }) }, '+ Walk-in certificate') : null,
+    el('p', { class: 'small muted' }, can('certify') ? 'For a patient seen in the OPD. For an admitted patient, open her final summary and issue it there: the dates come from her admission.' : 'Only a consultant can issue certificates. You can print and send any of these.'),
+    box, certList()), bottomNav('certs'));
 }
 
 // ------------------------------------------------------------------ settings and the PI's buttons screen
@@ -1219,15 +1260,21 @@ function buildPdf(r, imgs) {
     const c = r._cert, n = certDays_(c);
     const cell = (x, yy, w, label, val) => { ops.push('q 0.72 G 0.7 w'); rect(x, yy - 32, w, 32); ops.push('Q'); Tk(x + 6, yy - 11, label, 7, true, GREY); T_(x + 6, yy - 24.5, wrap(val, 10.5, w - 12)[0] || '', 10.5, false); };
     const boxes = c.ctype === 'A' ? [[0.4, 'ATTENDANT', c.attendant + (c.relation ? ' (' + c.relation + ')' : '')], [0.38, 'PATIENT', (c.title ? c.title + ' ' : '') + c.patient], [0.22, 'DATE OF ISSUE', dmy_(c.issued_on)]]
-      : [[0.4, 'PATIENT', (c.title ? c.title + ' ' : '') + c.patient], [0.38, 'HUSBAND’S / FATHER’S NAME', c.guardian], [0.22, 'DATE OF ISSUE', dmy_(c.issued_on)]];
+      : [[0.4, 'PATIENT', (c.title ? c.title + ' ' : '') + c.patient + (c.age ? ', ' + c.age + (/\d$/.test(c.age) ? ' y' : '') : '')], [0.38, /^(Mr|Master|Ms|Miss)$/.test(c.title) ? 'FATHER’S NAME' : 'HUSBAND’S / FATHER’S NAME', c.guardian], [0.22, 'DATE OF ISSUE', dmy_(c.issued_on)]];
     let x = M; boxes.forEach((b) => { cell(x, y, b[0] * CW, b[1], b[2] || ''); x += b[0] * CW; }); y -= 32;
-    const per = c.ctype === 'F' ? [[0.4, 'FIT TO RESUME FROM', dmy_(c.from_date)], [0.38, 'FOR', codeLabel2_(PURPOSES, c.purpose)], [0.22, 'SUMMARY NO.', c.ds_no]]
-      : [[0.2, 'FROM', dmy_(c.from_date)], [0.2, 'TO', dmy_(c.to_date)], [0.18, 'DAYS', String(n)], [0.2, c.ctype === 'A' ? 'FOR' : 'MAY RESUME ON', c.ctype === 'A' ? codeLabel2_(PURPOSES, c.purpose) : dmy_(isoFromDay_(dayNo_(c.to_date) + 1))], [0.22, 'SUMMARY NO.', c.ds_no]];
+    const per = c.ctype === 'F' ? [[0.4, 'FIT TO RESUME FROM', dmy_(c.from_date)], [0.38, 'FOR', codeLabel2_(PURPOSES, c.purpose)], [0.22, c.ds_no ? 'SUMMARY NO.' : 'SEEN IN OPD ON', c.ds_no || dmy_(c.exam_date)]]
+      : [[0.2, 'FROM', dmy_(c.from_date)], [0.2, 'TO', dmy_(c.to_date)], [0.18, 'DAYS', String(n)], [0.2, c.ctype === 'A' ? 'FOR' : 'MAY RESUME ON', c.ctype === 'A' ? codeLabel2_(PURPOSES, c.purpose) : dmy_(isoFromDay_(dayNo_(c.to_date) + 1))], [0.22, c.ds_no ? 'SUMMARY NO.' : 'SEEN IN OPD ON', c.ds_no || dmy_(c.exam_date)]];
     x = M; per.forEach((b) => { cell(x, y, b[0] * CW, b[1], b[2] || ''); x += b[0] * CW; }); y -= 32;
     y -= 30;
     if (s_(c.addressed_to)) { T_(M, y, 'To: ' + c.addressed_to, 11, true); y -= 24; }
     else { T_(M, y, 'To whom it may concern', 11, true); y -= 24; }
     certText_(c).forEach((para) => { wrap(para, 11.5, CW).forEach((l) => { T_(M, y, l, 11.5, false); y -= 17; }); y -= 9; });
+    y -= 6;                                              // the purpose limit, boxed, so it cannot be missed or cut off a photocopy
+    const cut = CERT_LEGAL.indexOf('. ') + 1, lw = wrap(CERT_LEGAL.slice(cut).trim(), 8.5, CW - 20), lh = (lw.length + 1) * 11 + 14;
+    ops.push('q 0.99 0.96 0.86 rg ' + M + ' ' + (y - lh).toFixed(2) + ' ' + CW + ' ' + lh + ' re f 0.6 0.45 0 RG 0.8 w ' + M + ' ' + (y - lh).toFixed(2) + ' ' + CW + ' ' + lh + ' re S Q');
+    T_(M + 10, y - 13, CERT_LEGAL.slice(0, cut), 8.5, true);
+    lw.forEach((l, k) => T_(M + 10, y - 24 - k * 11, l, 8.5, false));
+    y -= lh;
     y = Math.min(y - 30, M + SIG + 140);
   } else {
     // the patient box, as on the pad

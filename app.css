@@ -158,3 +158,6 @@ main { padding: 12px; max-width: 720px; margin: 0 auto; }
 .certrow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
 .certrow .main { flex: 1; min-width: 0; } .certrow.gone b { text-decoration: line-through; color: var(--muted); }
 .certprev { font-size: 15px; line-height: 1.5; } .certprev p { margin: 0 0 8px; }
+.bn .lbl { white-space: nowrap; }
+@media (max-width: 400px) { .bnav .bn .lbl { font-size: 10px; letter-spacing: -.01em; } }
+#cert-search { margin: 8px 0; }

@@ -41,6 +41,7 @@
       const tips = el('section', 'card', el('h2', null, 'Before you accept it'), el('ul', 'tips',
         el('li', null, 'Every detail above must match the paper exactly. A different name or date means the paper was altered.'),
         el('li', null, 'This page must open at ir1s-vir1s.github.io. The hospital never asks for a password, card or payment here.'),
+        d.kind === 'certificate' ? el('li', null, 'This certificate is for leave from work or studies only. It is not a medico-legal certificate (MLC) and is not for use in any court, police inquiry or other legal proceedings.') : null,
         el('li', null, d.kind === 'certificate' ? 'The diagnosis appears only if the patient agreed to have it on the certificate.' : 'Medicines, history and results are not shown here, to protect the patient’s privacy.')));
       show(head, card, codeLine, tips, call);
     })
