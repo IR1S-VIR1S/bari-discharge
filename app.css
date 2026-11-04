@@ -125,3 +125,32 @@ main { padding: 12px; max-width: 720px; margin: 0 auto; }
 .urdu-prev { font-family: 'BariUrdu', 'Noto Nastaliq Urdu', serif; font-size: 17px; line-height: 2.1; margin-top: 6px; padding: 4px 10px; border-radius: 10px; background: var(--chip); color: var(--ink); }
 .urdu-prev:empty { display: none; }
 .urdu-prev .none { font-family: inherit; font-size: 12px; color: var(--muted); direction: ltr; text-align: left; line-height: 1.6; }
+
+/* Follow-ups: counts on Home, the recall list and the month calendar. Red = overdue or missed, amber = today, green = booked. */
+.banner.warn { background: var(--wait-tint); color: var(--wait); margin: 8px 0; }
+.fstats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 6px; }
+.fstat { border: 0; border-radius: 12px; padding: 8px 6px; text-align: center; display: flex; flex-direction: column; gap: 1px; }
+.fstat b { font-size: 22px; line-height: 1.1; } .fstat span { font-size: 12px; }
+.fstat.bad { background: var(--bad-tint); color: var(--bad); } .fstat.wait { background: var(--wait-tint); color: var(--wait); }
+.fstat.fin { background: var(--fin-tint); color: var(--fin); } .fstat.zero { background: var(--chip); color: var(--muted); }
+.calhead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.calhead b { font-size: 17px; }
+.calnav { border: 1px solid var(--line); background: var(--chip); color: var(--link); border-radius: 10px; width: 40px; height: 36px; font-size: 22px; line-height: 1; }
+.calgrid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.calgrid .wd { text-align: center; font-size: 12px; font-weight: 700; color: var(--muted); padding: 2px 0; }
+.cd { position: relative; aspect-ratio: 1 / 1; min-height: 40px; border: 1px solid transparent; border-radius: 10px; background: none; color: var(--ink); padding: 3px 0 0; display: flex; flex-direction: column; align-items: center; }
+.cd.blank { pointer-events: none; }
+.cd .dn { font-size: 14px; }
+.cd .cnt { font-style: normal; font-size: 11px; font-weight: 700; min-width: 18px; height: 18px; line-height: 18px; border-radius: 9px; margin-top: 2px; padding: 0 4px; color: #fff; background: var(--grey); }
+.cd.has.missed .cnt, .cd.has.overdue .cnt { background: #b3261e; } .cd.has.today .cnt { background: #8a5a00; }
+.cd.has.soon .cnt, .cd.has.later .cnt { background: var(--green); }
+.cd.now .dn { font-weight: 800; color: var(--link); text-decoration: underline; }
+.cd.sel { border-color: var(--link); background: var(--chip); }
+.calkey { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-top: 8px; }
+.calkey .k { display: inline-block; width: 10px; height: 10px; border-radius: 5px; }
+.calkey .k.bad { background: #b3261e; } .calkey .k.wait { background: #8a5a00; } .calkey .k.fin { background: var(--green); } .calkey .k.done { background: var(--grey); }
+.chip.ic { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+.chip.ic .ico, .chip.ic .ico svg { width: 18px; height: 18px; display: block; color: var(--link); }
+.fupart { margin: 8px 0; }
+.row2.pick { margin-top: 8px; align-items: center; }
+.fulog { margin-top: 8px; } .fulog summary { color: var(--link); cursor: pointer; }

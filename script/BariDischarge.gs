@@ -1,7 +1,7 @@
 /**
  * ============================================================================
- *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.1
- *  31 October 2026. One file: paste into the spreadsheet's Apps Script editor.
+ *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.2
+ *  4 November 2026. One file: paste into the spreadsheet's Apps Script editor.
  * ============================================================================
  *  Keeps one row per discharge in the tab DISCHARGES, with the same headings as the
  *  printed Discharge Summary pad (front and back). Consultants and medical officers
@@ -14,6 +14,7 @@
  *                 seen only on the PI phone until approved (menu: approve all draft buttons)
  *    TEMPLATES    whole-summary templates saved from the phone (clinical sections only)
  *    STAFF        consultant and medical officer names offered as buttons
+ *    FOLLOW_UPS   every follow-up not yet attended or closed, soonest first (a live view: do not type in it)
  *    LOG          who changed what and when (field names only, not the text)
  *
  *  Install:
@@ -30,8 +31,8 @@
  */
 
 const CFG = {
-  VERSION: '1.1',
-  SCHEMA_VER: 2,                      // 2: obstetric layout (G/P, weeks, co-morbid, operation date, Hb/TLC/PLT)
+  VERSION: '1.2',
+  SCHEMA_VER: 3,                      // 2: obstetric layout (G/P, weeks, co-morbid, operation date, Hb/TLC/PLT); 3: follow-up calendar and patient phone
   TZ: 'Asia/Karachi',
   MENU: 'Bari Discharge',
   DS_PREFIX: 'BH-',
@@ -49,6 +50,11 @@ const GRAVIDA = nums_(1, 10, 'G');
 const PARA = nums_(0, 9, 'P');
 const WEEKS = nums_(24, 42, '');
 const COMORBID = [['D', 'Diabetes'], ['H', 'Hypertension']];   // ticking one shows its quick buttons
+// Follow-up (recall) tracking. A blank status means the patient is expected on fu_date.
+const FU_STATUS = [['A', 'Attended'], ['M', 'Missed'], ['X', 'Closed']];
+const FU_REASONS = ['Wound check', 'Stitch removal', 'Postnatal check (6 weeks)', 'BP check', 'Sugar check', 'Review with reports'];
+const FU_KEYS = ['phone', 'fu_date', 'fu_for', 'fu_status', 'fu_note', 'fu_reminded'];   // may be changed on a final summary by any writer
+const FU_SOON_DAYS = 7;                                         // "this week" on the calendar
 
 function col(key, label, type, o) { const c = { key: key, label: label, type: type }; if (o) Object.keys(o).forEach(function (k) { c[k] = o[k]; }); return c; }
 
@@ -60,6 +66,7 @@ const SCHEMA = [{ tab: 'DISCHARGES', title: 'Obstetric discharge summaries', col
   col('date', 'Date', 'date'),
   col('name', 'Name', 'text'),
   col('father_husband', 'Husband\u2019s / Father\u2019s name', 'text'),
+  col('phone', 'Patient\u2019s mobile', 'phone'),
   col('age', 'Age', 'age'),
   col('sex', 'Sex', 'code', { codes: SEX }),
   col('marital', 'Marital status', 'code', { codes: MARITAL }),
@@ -81,13 +88,19 @@ const SCHEMA = [{ tab: 'DISCHARGES', title: 'Obstetric discharge summaries', col
   col('course', 'Course & treatment in the hospital', 'sec'),
   col('discharge_meds', 'Discharge medications', 'sec'),
   col('follow_up', 'Follow up instructions', 'sec'),
+  col('fu_date', 'Next follow-up date', 'date'),
+  col('fu_for', 'Follow-up for', 'text'),
+  col('fu_status', 'Follow-up status', 'code', { codes: FU_STATUS }),
+  col('fu_note', 'Follow-up note', 'text'),
+  col('fu_reminded', 'Reminder sent on', 'date'),
   col('mo_name', 'Medical officer', 'text'),
   col('created_by', 'Created by', 'sys'),
   col('created_at', 'Created at', 'sys'),
   col('updated_by', 'Last changed by', 'sys'),
   col('updated_at', 'Last changed at', 'sys'),
   col('finalised_by', 'Finalised by', 'sys'),
-  col('finalised_at', 'Finalised at', 'sys')
+  col('finalised_at', 'Finalised at', 'sys'),
+  col('fu_log', 'Follow-up history', 'sys')
 ] }];
 const DCOLS = SCHEMA[0].cols;
 const SECTIONS = DCOLS.filter(function (c) { return c.type === 'sec'; }).map(function (c) { return c.key; });
@@ -140,9 +153,12 @@ function validateValue_(c, v, row) {
       if ((c.key === 'admit_date' || c.key === 'discharge_date') && a !== null && b !== null && b < a) return 'Date of discharge is before the date of admission';
       if ((c.key === 'op_date' || c.key === 'admit_date') && o !== null && a !== null && o < a) return 'Date of operation is before the date of admission';
       if ((c.key === 'op_date' || c.key === 'discharge_date') && o !== null && b !== null && o > b) return 'Date of operation is after the date of discharge';
+      const f = dayNo_(row.fu_date);
+      if (c.key === 'fu_date' && f !== null && b !== null && f < b) return 'Next follow-up date is before the date of discharge';
     }
     return '';
   }
+  if (c.type === 'phone') return /^\+?[0-9][0-9 -]{8,16}[0-9]$/.test(s) && s.replace(/\D/g, '').length >= 10 && s.replace(/\D/g, '').length <= 13 ? '' : c.label + ': 10 to 13 digits, e.g. 0300 1234567';
   if (c.type === 'age') return /^\d{1,3}(\.\d)?( ?(y|yr|yrs|years?|m|mo|months?|d|days?|w|wk|weeks?))?$/i.test(s) && parseFloat(s) <= 120 ? '' : 'Age: a number, optionally followed by years, months, weeks or days';
   return '';
 }
@@ -188,6 +204,39 @@ function rowProblems_(row) {
   return out;
 }
 
+// ---------------------------------------------------------------- follow-ups (shared with the phone)
+// Where a follow-up stands on a given day, as recall worklists group them:
+// missed (needs a call), overdue, today, soon (within FU_SOON_DAYS), later; done = attended or closed; none = no date.
+function fuState_(row, today) {
+  const d = dayNo_(row.fu_date), st = code_(row.fu_status);
+  if (d === null) return 'none';
+  if (st === 'A' || st === 'X') return 'done';
+  if (st === 'M') return 'missed';
+  if (d < today) return 'overdue';
+  if (d === today) return 'today';
+  return d - today <= FU_SOON_DAYS ? 'soon' : 'later';
+}
+function isoFromDay_(n) { const t = new Date(n * 864e5); return t.getUTCFullYear() + '-' + pad2_(t.getUTCMonth() + 1) + '-' + pad2_(t.getUTCDate()); }
+function addDays_(iso, n) { const d = dayNo_(iso); return d === null ? '' : isoFromDay_(d + n); }
+// "Stitch removal after 7 days" -> 7. The first "after N days/weeks" in the instructions suggests the follow-up date.
+function fuAfterDays_(text) { const m = /\bafter (\d{1,2}) (day|days|week|weeks)\b/i.exec(str_(text)); return m ? +m[1] * (/^week/i.test(m[2]) ? 7 : 1) : 0; }
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function fuLine_(row) {                       // printed on the summary
+  const d = dayNo_(row.fu_date);
+  if (d === null) return '';
+  return 'Next visit: ' + WEEKDAYS[(d + 4) % 7] + ' ' + isoFromDay_(d).split('-').reverse().join('-') + (str_(row.fu_for) ? ' (' + str_(row.fu_for) + ')' : '');
+}
+// A Pakistani mobile as WhatsApp wants it: 0300 1234567 -> 923001234567
+function waNumber_(phone) { const d = str_(phone).replace(/\D/g, ''); return /^03\d{9}$/.test(d) ? '92' + d.slice(1) : /^923\d{9}$/.test(d) ? d : /^3\d{9}$/.test(d) ? '92' + d : ''; }
+function fuReminder_(row) {
+  const d = dayNo_(row.fu_date);
+  if (d === null) return '';
+  const when = WEEKDAYS[(d + 4) % 7] + ' ' + isoFromDay_(d).split('-').reverse().join('-');
+  return 'Bari Hospital: ' + (str_(row.name) || 'Dear patient') + ', your follow-up' + (str_(row.fu_for) ? ' (' + str_(row.fu_for) + ')' : '') + ' is on ' + when + ' in the OPD, 73-G Gulberg III, Lahore.' +
+    ' To change the day, call ' + CFG.HOSPITAL.phone.replace(/^Ph: /, '') + '.' +
+    '\n\u0628\u0627\u0631\u06cc \u06c1\u0633\u067e\u062a\u0627\u0644: \u0622\u067e \u06a9\u0627 \u0686\u06cc\u06a9 \u0627\u067e ' + isoFromDay_(d).split('-').reverse().join('-') + ' \u06a9\u0648 \u06c1\u06d2\u06d4 \u062f\u0646 \u0628\u062f\u0644\u0646\u06d2 \u06a9\u06d2 \u0644\u06cc\u06d2 \u0641\u0648\u0646 \u06a9\u0631\u06cc\u06ba: ' + CFG.HOSPITAL.phone.replace(/^Ph: /, '');
+}
+
 // ---------------------------------------------------------------- roles (shared with the phone)
 const ROLE_NAMES = { pi: 'PI', consultant: 'Consultant', mo: 'Medical officer' };
 function roleCan_(role, what) {
@@ -227,7 +276,7 @@ function onOpen() {                      // used only when this file is pasted o
   m.addToUi();
 }
 // What the loader calls. Every entry point must be listed here.
-const RELEASE_NOTE = 'obstetric layout, templates, upgrade of older summaries';   // shown by "PI: install update"
+const RELEASE_NOTE = 'follow-up calendar: next visit date, reason, patient mobile, attended or missed, WhatsApp reminder';   // shown by "PI: install update"
 function exports_() {
   return { VERSION: CFG.VERSION, RELEASE_NOTE: RELEASE_NOTE, SCHEMA_VER: CFG.SCHEMA_VER, MENU: CFG.MENU, MENU_ITEMS: MENU_ITEMS,
     setup: setup, menuUsers: menuUsers, menuInvite: menuInvite, menuRevoke: menuRevoke, menuApproveQuick: menuApproveQuick, doGet: doGet, doPost: doPost };
@@ -297,11 +346,24 @@ function buildAll_(ss) {
   const st = sheet_(ss, 'STAFF', STAFF_COLS);
   if (st.getLastRow() < 2) st.getRange(2, 1, SEED_STAFF.length, STAFF_COLS.length).setValues(SEED_STAFF);
   st.getRange(1, 1, 1, STAFF_COLS.length).setNotes([['Name as printed', 'consultant or mo', 'Printed under the name, e.g. Gynaecologist & Obstetrician', 'Degrees, e.g. MBBS, FCPS', 'Personal number printed on that consultant\u2019s summaries']]);
+  followTab_(ss);
   const lg = sheet_(ss, 'LOG', ['at', 'user', 'action', 'ds_no', 'detail']);
   try {                                                  // only the PI may edit the system tabs by hand
     [lg].forEach(function (sh) { const p = sh.protect().setDescription('system'); p.getEditors().forEach(function (u) { if ((u.getEmail() || '').toLowerCase() !== piEmail_()) p.removeEditor(u); }); });
   } catch (e) { /* protection is a convenience; the phones never depend on it */ }
   const s1 = ss.getSheetByName('Sheet1'); if (s1 && s1.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(s1);
+}
+// A live view of every open follow-up, soonest first. It reads DISCHARGES, so it never needs saving.
+function colLetter_(i) { let s = '', n = i + 1; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }
+function followTab_(ss) {
+  let sh = ss.getSheetByName('FOLLOW_UPS');
+  if (!sh) sh = ss.insertSheet('FOLLOW_UPS');
+  const keys = DCOLS.map(function (c) { return c.key; }), L = function (k) { return colLetter_(keys.indexOf(k)); };
+  const pick = ['fu_date', 'fu_for', 'fu_status', 'name', 'phone', 'ds_no', 'discharge_date', 'consultant', 'fu_note', 'fu_reminded'].map(L).join(', ');
+  const last = colLetter_(keys.length - 1);
+  sh.getRange(1, 1).setFormula('=QUERY(DISCHARGES!A:' + last + ', "select ' + pick + ' where ' + L('fu_date') + " <> '' and " + L('fu_status') + " <> 'A' and " + L('fu_status') + " <> 'X' order by " + L('fu_date') + '", 1)');
+  sh.getRange(1, 12).setValue('Open follow-ups, soonest first (blank status = expected, M = missed). Change them on the phone.');
+  sh.setFrozenRows(1);
 }
 function seedNote_(ss) {
   const n = ss.getSheetByName('QUICK').getLastRow() - 1;
@@ -664,6 +726,7 @@ function appPull_(u) {
   const ss = ss_(), today = dayNo_(todayIso_());
   const rows = dRows_(ss).filter(function (r) {
     if (r.status !== 'F') return true;                                  // every draft
+    if (['missed', 'overdue', 'today', 'soon', 'later'].indexOf(fuState_(r, today)) >= 0) return true;   // and every open follow-up, however old
     const d = dayNo_(r.discharge_date) || dayNo_(String(r.updated_at).slice(0, 10));
     return d === null || today - d <= CFG.PULL_DAYS;
   }).map(function (r) { delete r._row; return r; });
@@ -708,7 +771,8 @@ function appPush_(u, changes) {
         if (conflicts.length) { res.status = 'conflict'; res.errors = conflicts.map(function (k) { return colOf_(k).label + ' was changed by ' + (row.updated_by || 'someone else'); }); res.current = row; delete res.current._row; results.push(res); return; }
         const next = JSON.parse(JSON.stringify(row));
         Object.keys(vals).forEach(function (k) { next[k] = k === 'status' || colOf_(k).type === 'code' || colOf_(k).type === 'multi' ? code_(vals[k]) : String(vals[k]).replace(/\r\n?/g, '\n').trim(); });
-        if (before && before.status === 'F' && !roleCan_(u.role, 'finalise')) throw new Error('this summary is final; only a consultant can change it');
+        const fuOnly = before && keys.every(function (k) { return FU_KEYS.indexOf(k) >= 0 || k === 'fu_log' || str_(before[k]) === str_(next[k]); });
+        if (before && before.status === 'F' && !fuOnly && !roleCan_(u.role, 'finalise')) throw new Error('this summary is final; only a consultant can change it (follow-up details can still be changed)');
         if (next.status === 'F' && (!before || before.status !== 'F') && !roleCan_(u.role, 'finalise')) throw new Error('only a consultant can finalise');
         const probs = rowProblems_(next);
         if (probs.length) throw new Error(probs.join('; '));
@@ -718,6 +782,9 @@ function appPush_(u, changes) {
         if (!isNew && changed.length === 0) { res.status = 'ok'; res.ds_no = row.ds_no; results.push(res); return; }   // a retry of a change already saved
         const at = nowTxt_(), by = str_(ch.by).slice(0, 60) || u.email;
         next.updated_by = by; next.updated_at = at;
+        const fuMsg = fuChange_(before || {}, next);
+        if (fuMsg) next.fu_log = (str_(next.fu_log) ? str_(next.fu_log) + '\n' : '') + at.slice(0, 10) + ' ' + by + ': ' + fuMsg;
+        if (str_(next.fu_log).length > 2000) next.fu_log = str_(next.fu_log).slice(-2000).replace(/^[^\n]*\n/, '');
         if (isNew) { next.ds_no = nextDs_(rows); next.created_by = by; next.created_at = at; }
         if (next.status === 'F' && (!before || before.status !== 'F')) { next.finalised_by = by; next.finalised_at = at; }
         if (next.status === 'D') { next.finalised_by = ''; next.finalised_at = ''; }
@@ -730,6 +797,17 @@ function appPush_(u, changes) {
     });
     return { ok: true, results: results };
   });
+}
+
+// One line for the follow-up history, written by the workbook (never by a phone) so it can be trusted.
+function fuChange_(a, b) {
+  const out = [], lab = function (k, v) { return codeLabel_(k, v).toLowerCase(); };
+  if (str_(a.fu_date) !== str_(b.fu_date)) out.push(str_(b.fu_date) ? (str_(a.fu_date) ? 'moved to ' : 'booked for ') + str_(b.fu_date) + (str_(b.fu_for) ? ' (' + str_(b.fu_for) + ')' : '') : 'follow-up removed');
+  else if (str_(a.fu_for) !== str_(b.fu_for) && str_(b.fu_date)) out.push('reason now ' + str_(b.fu_for));
+  if (code_(a.fu_status) !== code_(b.fu_status)) out.push(code_(b.fu_status) ? lab('fu_status', b.fu_status) + (str_(a.fu_date) && str_(a.fu_date) === str_(b.fu_date) ? ' on ' + str_(b.fu_date) : '') : 'expected again');
+  if (str_(a.fu_reminded) !== str_(b.fu_reminded) && str_(b.fu_reminded)) out.push('reminder sent');
+  if (str_(a.fu_note) !== str_(b.fu_note) && str_(b.fu_note)) out.push('note: ' + str_(b.fu_note));
+  return out.join('; ');
 }
 
 function quickAdd_(u, req) {

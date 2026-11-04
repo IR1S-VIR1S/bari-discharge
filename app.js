@@ -3,8 +3,8 @@
  * workbook (BariDischarge.gs web app) whenever the phone is online. Fields, codes and checks come from
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
-const APP_VERSION = '1.0';
-const BUILD_ID = 'c3c7b90c793e';
+const APP_VERSION = '1.2';
+const BUILD_ID = '9e546f400624';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -278,7 +278,7 @@ function render() {
   else {
     const c = cur();
     page = c.name === 'form' ? formScreen(c.p) : c.name === 'view' ? viewScreen(c.p) : c.name === 'list' ? listScreen() : c.name === 'settings' ? settingsScreen()
-      : c.name === 'buttons' ? buttonsScreen() : homeScreen();
+      : c.name === 'buttons' ? buttonsScreen() : c.name === 'fu' ? fuScreen() : homeScreen();
   }
   app.replaceChildren(page);
 }
@@ -302,9 +302,12 @@ const ICONS = {
   face: '<path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M9 9.5v1M15 9.5v1M12 9.5v3.5h-1M9.2 15.6a4 4 0 0 0 5.6 0"/>',
   invite: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-6 6.5-6s5.9 2.4 6.5 6"/><path d="M18.5 8v6M15.5 11h6"/>',
   update: '<path d="M12 3.5v11M7.5 10l4.5 4.5 4.5-4.5M4.5 16.5v2a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-2"/>',
-  name: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>'
+  name: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4M8 14h2M14 14h2M8 17.5h2"/>',
+  phone: '<path d="M6.5 3.5h3l1.5 4-2 1.5a11 11 0 0 0 6 6l1.5-2 4 1.5v3a2 2 0 0 1-2 2A16.5 16.5 0 0 1 4.5 5.5a2 2 0 0 1 2-2z"/>',
+  chat: '<path d="M4 19.5 5.3 16A8 8 0 1 1 8 18.7z"/><path d="M9 10.5h6M9 13.5h4"/>'
 };
-const ICON_DETAIL = { records: [1], buttons: [3] };      // inner strokes that stay visible when the selected icon is filled
+const ICON_DETAIL = { records: [1], buttons: [3], calendar: [1] };      // inner strokes that stay visible when the selected icon is filled
 function icon(k) {
   const s = el('span', { class: 'ico', 'aria-hidden': 'true' });
   s.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + ICONS[k] + '</svg>';
@@ -314,8 +317,10 @@ function icon(k) {
 function bottomNav(active) {
   const all = records(), bad = attention().length, drafts = all.filter((r) => r.status !== 'F').length;
   const drafted = ((S.server && S.server.quick) || []).filter((q) => q.draft).length;
-  const tabs = [['home', 'Home', 'home'], ['list', 'Summaries', 'records']].concat(role() === 'pi' ? [['buttons', 'Buttons', 'buttons']] : []).concat([['settings', 'Settings', 'settings']]);
+  const fuDue = fuOpen().filter((x) => x.st === 'missed' || x.st === 'overdue' || x.st === 'today').length;
+  const tabs = [['home', 'Home', 'home'], ['list', 'Summaries', 'records'], ['fu', 'Follow-ups', 'calendar']].concat(role() === 'pi' ? [['buttons', 'Buttons', 'buttons']] : []).concat([['settings', 'Settings', 'settings']]);
   const badge = (id) => (id === 'home' && bad ? el('i', { class: 'badge', 'aria-label': bad + ' need attention' }, String(bad))
+    : id === 'fu' && fuDue ? el('i', { class: 'badge', 'aria-label': fuDue + ' follow-ups due' }, String(fuDue))
     : id === 'list' && drafts ? el('i', { class: 'badge blue', 'aria-label': drafts + ' drafts' }, String(drafts))
     : id === 'buttons' && drafted ? el('i', { class: 'badge amber', 'aria-label': drafted + ' draft buttons' }, String(drafted)) : null);
   const nav = el('nav', { class: 'bnav', 'aria-label': 'Main' }, tabs.map((t) => el('button', { class: 'bn' + (t[0] === active ? ' on' : ''), type: 'button', id: 'nav-' + t[0], 'data-tab': t[0], 'aria-current': t[0] === active ? 'page' : null, onclick: () => tabTo(t[0]) },
@@ -446,6 +451,7 @@ function homeScreen() {
   return el('div', { class: 'page' }, topBar('Bari Discharge'),
     el('main', null,
       el('button', { class: 'btn big primary block', type: 'button', id: 'new-summary', onclick: () => newSummary() }, '+ New discharge summary'),
+      fuHomeCard(),
       searchBox(),
       el('div', { id: 'results' }),
       bad.length ? el('section', { class: 'feed alert' }, el('h2', null, 'Needs attention (' + bad.length + ')'), bad.map(card)) : null,
@@ -513,6 +519,7 @@ function formScreen(p) {
       el('section', { class: 'card' }, el('h2', null, 'Patient'),
         textField('name', set, { cap: 'words' }), textField('father_husband', set, { cap: 'words' }),
         textField('age', set, { mode: 'numeric', ph: 'years' }),
+        phoneField(set),
         codeField('marital', set), codeField('religion', set)),
       el('section', { class: 'card' }, el('h2', null, 'Obstetric'),
         codeField('gravida', set), codeField('para', set), codeField('gest_weeks', set), comorbidField(set)),
@@ -522,7 +529,7 @@ function formScreen(p) {
         dateField('op_date', set, [['Today', 0], ['Yesterday', 1], ['2 days ago', 2], ['3 days ago', 3]]),
         dateField('discharge_date', set, [['Today', 0], ['Yesterday', 1]]),
         staffField('consultant', set, 'consultant'), staffField('mo_name', set, 'mo')),
-      SECTIONS.map((k) => [sectionField(k, set), k === 'physical_findings' ? labsCard(set) : null])),
+      SECTIONS.map((k) => [sectionField(k, set), k === 'physical_findings' ? labsCard(set) : null, k === 'follow_up' ? fuFormCard(set) : null])),
     el('div', { class: 'actbar' },
       el('button', { class: 'btn', type: 'button', id: 'save-draft', onclick: () => saveForm(true) }, final ? 'Save' : 'Save draft'),
       can('finalise') && !final ? el('button', { class: 'btn primary', type: 'button', id: 'finalise', onclick: finaliseForm }, 'Finalise') : null,
@@ -589,6 +596,7 @@ function sectionField(k, set) {
   const preview = k === 'discharge_meds' ? el('div', { class: 'urdu-prev', id: 'urdu-prev', lang: 'ur', dir: 'rtl' }) : null;
   const paintUrdu = () => { if (!preview) return; preview.replaceChildren(...ta.value.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => el('div', { class: urduFor_(l) ? '' : 'none' }, urduFor_(l) || 'No Urdu wording for this line. Add it after " | ".'))); };
   if (preview) { ta.addEventListener('input', paintUrdu); setTimeout(paintUrdu, 0); }
+  if (k === 'follow_up') ta.addEventListener('input', () => paintFuHint(ta.value));
   return el('section', { class: 'card sec', id: 'w-' + k }, el('h2', null, el('label', { for: 'f-' + k }, colDef(k).label)), ta, preview,
     blocks.map((b) => el('div', { class: 'qgroup' }, el('div', { class: 'qlab' }, b[0]), el('div', { class: 'chips' }, b[1].map(chip)))),
     el('div', { class: 'secacts' },
@@ -664,6 +672,7 @@ function finaliseForm() {
     e.currentTarget.textContent = (asTpl ? '\u2611 ' : '\u2610 ') + 'Also save as a template'; tplName.hidden = !asTpl; if (asTpl) tplName.focus();
   } }, '\u2610 Also save as a template');
   modal('Finalise this summary?', el('div', null, el('p', null, 'It is marked final with your name. Only a consultant can change it afterwards.'),
+    !s_(v.fu_date) ? el('p', { class: 'banner warn', id: 'fin-nofu' }, 'No follow-up date: she will not appear on the follow-up calendar. Cancel and set one under Next follow-up, or finalise without.') : null,
     can('template') ? el('div', null, tplBox, tplName, el('p', { class: 'small muted' }, 'A template keeps the clinical sections only, never the patient\u2019s details. The same name replaces an older template.')) : null),
   [['Cancel', null], ['Finalise', () => {
     v.status = 'F'; T.form.dirty = true;
@@ -686,13 +695,14 @@ function viewScreen(p) {
       c && c.status === 'conflict' ? conflictCard(c) : null,
       c && c.status === 'refused' ? el('div', { class: 'banner bad' }, 'Not accepted by the workbook: ' + (c.errors || []).join('. ') + '. Open Edit to fix it.') : null,
       el('div', { class: 'card' }, el('div', { class: 'vhead' }, el('b', null, r.name), el('span', { class: 'chip-st ' + (final ? 'fin' : 'draft') }, final ? 'final' : 'draft')),
-        ['father_husband', 'age', 'marital', 'religion'].map(line),
+        ['father_husband', 'age', 'phone', 'marital', 'religion'].map(line),
         gpLine_(r) ? el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Obstetric'), el('span', { class: 'v' }, gpLine_(r))) : null,
         comorbidOf_(r).length ? el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Co-morbid'), el('span', { class: 'v' }, comorbidOf_(r).map((c) => (COMORBID.filter((x) => x[0] === c)[0] || [c, c])[1]).join(', '))) : null,
         ['date', 'admit_date', 'op_date', 'discharge_date', 'consultant', 'mo_name'].map(line),
         labsLine_(r) ? el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Investigations'), el('span', { class: 'v' }, labsLine_(r))) : null,
         final ? el('div', { class: 'small muted' }, 'Finalised by ' + r.finalised_by + ' on ' + s_(r.finalised_at)) : null),
       SECTIONS.map((k) => (s_(r[k]) ? el('div', { class: 'card' }, el('h2', null, colDef(k).label), el('div', { class: 'pre' }, r[k])) : null)),
+      fuViewCard(r),
       el('div', { class: 'stack' },
         el('button', { class: 'btn accent block', type: 'button', id: 'v-pdf', onclick: () => sharePdf(r) }, 'PDF: print or send on WhatsApp'),
         editable ? el('button', { class: 'btn block', type: 'button', id: 'v-edit', onclick: () => go('form', { uid: r.uid }) }, final ? 'Edit (final)' : 'Edit') : null,
@@ -727,6 +737,185 @@ function saveTemplate(r) {
       const values = {}; SECTIONS.forEach((k) => { values[k] = s_(r[k]); });
       sendTemplate(s_(nm.value), values);
     }, 'primary']]);
+}
+
+// ------------------------------------------------------------------ follow-ups: a recall list and calendar, as clinic systems keep them
+// Each summary carries one next-visit date. Open visits are grouped by urgency (missed, overdue, today, this week, later), the way recall
+// worklists in clinic software are; a missed visit stays at the top until someone rebooks or closes it, so nobody slips through.
+const todayNo = () => dayNo_(dayIso(0));
+function fuOpen() {
+  const t = todayNo();
+  return records().map((r) => ({ r, st: fuState_(r, t), d: dayNo_(r.fu_date) })).filter((x) => ['missed', 'overdue', 'today', 'soon', 'later'].indexOf(x.st) >= 0).sort((a, b) => a.d - b.d);
+}
+const FU_CLS = { missed: 'bad', overdue: 'bad', today: 'wait', soon: 'fin', later: 'draft', done: 'draft', none: 'draft' };
+function fuWhen(r) {
+  const d = dayNo_(r.fu_date), t = todayNo(); if (d === null) return '';
+  const n = d - t;
+  return n === 0 ? 'today' : n === 1 ? 'tomorrow' : n === -1 ? '1 day overdue' : n < 0 ? -n + ' days overdue' : 'in ' + n + ' days';
+}
+function fuLabel(r, st) { return st === 'done' ? codeLabel_('fu_status', r.fu_status).toLowerCase() : st === 'missed' ? 'did not come' : fuWhen(r); }
+function fuDayTxt(iso) { const d = dayNo_(iso); return d === null ? '' : WEEKDAYS[(d + 4) % 7] + ' ' + dmy(iso); }
+function fuCard(x) {
+  const r = x.r;
+  return el('button', { class: 'rec fu', type: 'button', 'data-uid': r.uid, onclick: () => fuSheet(r.uid) },
+    el('div', { class: 'main' }, el('div', { class: 'nm' }, r.name || '(no name)', s_(r.fu_reminded) ? el('span', { class: 'muted small' }, '  ✓ reminded') : null),
+      el('div', { class: 'sub' }, [fuDayTxt(r.fu_date), r.fu_for, r.ds_no].filter(Boolean).join(' | '))),
+    el('span', { class: 'chip-st ' + FU_CLS[x.st] }, fuLabel(r, x.st)));
+}
+function fuHomeCard() {
+  const open = fuOpen(), late = open.filter((x) => x.st === 'missed' || x.st === 'overdue'), now = open.filter((x) => x.st === 'today'), soon = open.filter((x) => x.st === 'soon');
+  const stat = (id, n, t, cls) => el('button', { class: 'fstat ' + (n ? cls : 'zero'), type: 'button', id, onclick: () => tabTo('fu') }, el('b', null, String(n)), el('span', null, t));
+  const due = late.concat(now);
+  return el('section', { class: 'card fuhome', id: 'fu-home' }, el('h2', null, 'Follow-ups'),
+    el('div', { class: 'fstats' }, stat('fs-late', late.length, 'overdue or missed', 'bad'), stat('fs-today', now.length, 'due today', 'wait'), stat('fs-soon', soon.length, 'next 7 days', 'fin')),
+    due.length ? due.slice(0, 6).map(fuCard) : el('p', { class: 'muted small' }, open.length ? 'Nobody is due today.' : 'No follow-ups booked. Set a next-visit date on a summary and she appears here when she is due.'),
+    due.length > 6 ? el('p', { class: 'muted small' }, '+ ' + (due.length - 6) + ' more on the calendar') : null,
+    el('button', { class: 'linkbtn', type: 'button', id: 'fu-open-cal', onclick: () => tabTo('fu') }, 'Open the follow-up calendar'));
+}
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+function fuScreen() {
+  const t = todayNo(), all = records();
+  if (!T.fuMonth) T.fuMonth = dayIso(0).slice(0, 7);
+  if (!T.fuDay) T.fuDay = dayIso(0);
+  const ym = T.fuMonth.split('-').map(Number), yy = ym[0], mm = ym[1], first = dayNo_(T.fuMonth + '-01'), days = new Date(yy, mm, 0).getDate();
+  const byDay = {};
+  all.forEach((r) => { const d = dayNo_(r.fu_date); if (d === null) return; (byDay[d] = byDay[d] || []).push({ r, st: fuState_(r, t), d }); });
+  const lead = (first + 3) % 7;                                    // Monday first: 1970-01-01 (day 0) was a Thursday
+  const worst = (xs) => ['missed', 'overdue', 'today', 'soon', 'later', 'done'].filter((s) => xs.some((x) => x.st === s))[0];
+  const cells = [];
+  for (let i = 0; i < lead; i++) cells.push(el('span', { class: 'cd blank' }));
+  for (let i = 0; i < days; i++) {
+    const d = first + i, xs = byDay[d] || [], iso = isoFromDay_(d), w = xs.length ? worst(xs) : '';
+    cells.push(el('button', { class: 'cd' + (d === t ? ' now' : '') + (iso === T.fuDay ? ' sel' : '') + (w ? ' has ' + w : ''), type: 'button', 'data-day': iso,
+      'aria-label': fuDayTxt(iso) + (xs.length ? ', ' + xs.length + ' follow-up' + (xs.length > 1 ? 's' : '') : ''),
+      onclick: () => { T.fuDay = iso; render(); } }, el('span', { class: 'dn' }, String(i + 1)), xs.length ? el('i', { class: 'cnt' }, String(xs.length)) : null));
+  }
+  const month = (n) => { const d = new Date(yy, mm - 1 + n, 1); T.fuMonth = d.getFullYear() + '-' + pad2(d.getMonth() + 1); render(); };
+  const open = fuOpen(), late = open.filter((x) => x.st === 'missed' || x.st === 'overdue');
+  const sel = (byDay[dayNo_(T.fuDay)] || []).sort((a, b) => (a.r.name || '').localeCompare(b.r.name || ''));
+  const week = open.filter((x) => x.st === 'today' || x.st === 'soon');
+  const away = T.fuMonth !== dayIso(0).slice(0, 7) || T.fuDay !== dayIso(0);
+  return el('div', { class: 'page' }, topBar('Follow-ups'), el('main', null,
+    late.length ? el('section', { class: 'feed alert', id: 'fu-late' }, el('h2', null, 'Overdue or missed (' + late.length + ')'),
+      el('p', { class: 'small muted' }, 'Call her or send a reminder, then rebook or close. She stays here until you do.'), late.map(fuCard)) : null,
+    el('section', { class: 'card cal', id: 'fu-cal' },
+      el('div', { class: 'calhead' }, el('button', { class: 'calnav', type: 'button', id: 'cal-prev', 'aria-label': 'Previous month', onclick: () => month(-1) }, '‹'),
+        el('b', { id: 'cal-month' }, MONTHS[mm - 1] + ' ' + yy), el('button', { class: 'calnav', type: 'button', id: 'cal-next', 'aria-label': 'Next month', onclick: () => month(1) }, '›')),
+      el('div', { class: 'calgrid' }, ['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((d) => el('span', { class: 'wd' }, d)), cells),
+      el('div', { class: 'calkey small muted' }, el('i', { class: 'k bad' }), 'overdue or missed', el('i', { class: 'k wait' }), 'today', el('i', { class: 'k fin' }), 'booked', el('i', { class: 'k done' }), 'attended or closed'),
+      away ? el('button', { class: 'linkbtn', type: 'button', id: 'cal-today', onclick: () => { T.fuMonth = dayIso(0).slice(0, 7); T.fuDay = dayIso(0); render(); } }, 'Back to today') : null),
+    el('section', { class: 'feed', id: 'fu-day' }, el('h2', null, fuDayTxt(T.fuDay) + ' (' + sel.length + ')'), sel.length ? sel.map(fuCard) : el('p', { class: 'muted small' }, 'Nobody booked on this day.')),
+    el('section', { class: 'feed', id: 'fu-week' }, el('h2', null, 'Due in the next 7 days (' + week.length + ')'), week.length ? week.map(fuCard) : el('p', { class: 'muted small' }, 'None.'))), bottomNav('fu'));
+}
+// The next-visit date on the form: buttons count from the date of discharge, and the instructions suggest one ("Stitch removal after 7 days").
+const FU_STEPS = [['1 week', 7], ['10 days', 10], ['2 weeks', 14], ['4 weeks', 28], ['6 weeks', 42]];
+function fuReasonOf(text) {
+  const t = s_(text);
+  return /stitch|suture|clip/i.test(t) ? 'Stitch removal' : /postnatal|6 weeks/i.test(t) ? 'Postnatal check (6 weeks)' : /\bBP\b/.test(t) ? 'BP check' : /sugar/i.test(t) ? 'Sugar check' : /report/i.test(t) ? 'Review with reports' : 'Wound check';
+}
+function paintFuHint(text) {
+  const box = $('#fu-hint'); if (!box || !T.form) return;
+  const hits = s_(text).split('\n').filter((l) => fuAfterDays_(l)).sort((x, y) => fuAfterDays_(x) - fuAfterDays_(y));     // the soonest visit named
+  const n = hits.length ? fuAfterDays_(hits[0]) : 0, base = s_(T.form.vals.discharge_date) || dayIso(0), iso = n ? addDays_(base, n) : '';
+  box.replaceChildren();
+  if (!iso || iso === s_(T.form.vals.fu_date)) return;
+  const reason = fuReasonOf(hits[0]);
+  box.append(el('button', { class: 'chip tpl', type: 'button', id: 'fu-suggest', onclick: () => {
+    T.form.vals.fu_date = iso; T.form.vals.fu_for = reason; T.form.dirty = true; const y = window.scrollY; render(); window.scrollTo(0, y);
+  } }, 'From the instructions: ' + fuDayTxt(iso) + ' (' + reason + ')'));
+}
+function fuFormCard(set) {
+  const v = T.form.vals, base = s_(v.discharge_date) || dayIso(0);
+  const di = el('input', { type: 'date', id: 'f-fu_date', value: s_(v.fu_date), min: s_(v.discharge_date) || null });
+  const when = el('div', { class: 'hint', id: 'fu-when' }, s_(v.fu_date) ? fuDayTxt(v.fu_date) + ', ' + fuWhen(v) : 'Not booked');
+  const setDate = (iso) => {
+    di.value = iso; set('fu_date', iso);
+    if (s_(v.fu_status)) set('fu_status', '');                    // a new date means she is expected again
+    when.textContent = iso ? fuDayTxt(iso) + ', ' + fuWhen(v) : 'Not booked'; paintFuHint(s_(v.follow_up));
+  };
+  di.addEventListener('input', () => setDate(di.value));
+  const ri = el('input', { type: 'text', id: 'f-fu_for', value: s_(v.fu_for), maxlength: '200', autocomplete: 'off', placeholder: 'e.g. Wound check' });
+  ri.addEventListener('input', () => set('fu_for', ri.value));
+  setTimeout(() => paintFuHint(s_(v.follow_up)), 0);
+  return el('section', { class: 'card', id: 'w-fu' }, el('h2', null, el('label', { for: 'f-fu_date' }, 'Next follow-up')),
+    el('div', { class: 'hint' }, 'She appears on Home and the follow-up calendar when she is due. The buttons count from the date of discharge.'),
+    el('div', { id: 'fu-hint', class: 'chips' }), di, when,
+    el('div', { class: 'chips', id: 'c-fu_date' }, FU_STEPS.map((q) => el('button', { class: 'chip', type: 'button', onclick: () => setDate(addDays_(base, q[1])) }, q[0])),
+      el('button', { class: 'chip', type: 'button', onclick: () => setDate('') }, 'None')),
+    el('label', { class: 'lab', for: 'f-fu_for' }, colDef('fu_for').label), ri,
+    el('div', { class: 'chips', id: 'c-fu_for' }, FU_REASONS.map((x) => el('button', { class: 'chip', type: 'button', onclick: () => { ri.value = x; set('fu_for', x); } }, x))));
+}
+function phoneField(set) {
+  const i = el('input', { type: 'tel', id: 'f-phone', value: s_(T.form.vals.phone), inputmode: 'tel', autocomplete: 'off', maxlength: '20', placeholder: '0300 1234567' });
+  i.addEventListener('input', () => set('phone', i.value.trim()));
+  return fieldWrap('phone', i, el('div', { class: 'hint' }, 'For follow-up calls and WhatsApp reminders. Read it back to her before discharge.'));
+}
+function fuViewCard(r) {
+  const st = fuState_(r, todayNo());
+  return el('section', { class: 'card', id: 'fu-view' }, el('h2', null, 'Next follow-up'),
+    st === 'none' ? el('p', { class: 'muted small' }, 'Not booked.')
+      : el('div', { class: 'vhead fuv' }, el('span', null, fuDayTxt(r.fu_date) + (s_(r.fu_for) ? ', ' + r.fu_for : '')), el('span', { class: 'chip-st ' + FU_CLS[st] }, fuLabel(r, st))),
+    s_(r.fu_note) ? el('div', { class: 'small muted' }, r.fu_note) : null,
+    can('edit') ? el('button', { class: 'btn block', type: 'button', id: 'fu-manage', onclick: () => fuSheet(r.uid) }, st === 'none' ? 'Book a follow-up' : 'Manage this follow-up') : null);
+}
+function closeModal() { const m = $('#modal'); m.hidden = true; m.replaceChildren(); }
+function fuSave(uid, vals, msg) {
+  closeModal();
+  if (!queueSave(uid, vals)) return;
+  saveState().then(() => sync()); render(); if (msg) toast(msg);
+}
+function datePicker(id, onPick) {
+  const t = dayIso(0), i = el('input', { type: 'date', id, min: t });
+  return el('div', null, el('div', { class: 'chips' }, [['Tomorrow', 1], ['In 3 days', 3], ['In 1 week', 7], ['In 2 weeks', 14], ['In 4 weeks', 28], ['In 6 weeks', 42]].map((q) => el('button', { class: 'chip', type: 'button', onclick: () => onPick(addDays_(t, q[1])) }, q[0]))),
+    el('div', { class: 'row2 pick' }, i, el('button', { class: 'btn', type: 'button', id: id + '-use', onclick: () => { if (dayNo_(i.value) !== null) onPick(i.value); else toast('Choose a date'); } }, 'Use this date')));
+}
+// One sheet for everything done with a follow-up: call, WhatsApp reminder, came, did not come, rebook, close. Each step is one tap.
+function fuSheet(uid) {
+  const r = record(uid); if (!r) return;
+  if (!can('edit')) { go('view', { uid }); return; }
+  const st = fuState_(r, todayNo()), today = dayIso(0), wa = waNumber_(r.phone), stamp = dmy(today), open = st !== 'none' && st !== 'done';
+  const body = el('div', { id: 'fu-sheet' });
+  const show = (...kids) => body.replaceChildren(...kids);
+  const back = () => el('button', { class: 'linkbtn', type: 'button', onclick: main }, 'Back');
+  const reasons = (pick, curv) => el('div', { class: 'chips', id: 'fu-reasons' }, FU_REASONS.map((x) => el('button', { class: 'chip' + (x === curv ? ' on' : ''), type: 'button', onclick: (e) => {
+    body.querySelectorAll('#fu-reasons .chip').forEach((b) => b.classList.remove('on')); e.currentTarget.classList.add('on'); pick(x);
+  } }, x)));
+  function main() {
+    show(el('div', { class: 'small muted' }, [r.ds_no, r.discharge_date ? 'discharged ' + dmy(r.discharge_date) : '', r.consultant].filter(Boolean).join(' | ')),
+      st !== 'none' ? el('p', null, el('b', null, fuDayTxt(r.fu_date)), s_(r.fu_for) ? ', ' + r.fu_for + ' ' : ' ', el('span', { class: 'chip-st ' + FU_CLS[st] }, fuLabel(r, st))) : el('p', null, 'No follow-up booked.'),
+      s_(r.phone) ? el('div', { class: 'chips' },
+        el('a', { class: 'chip ic', href: 'tel:' + s_(r.phone).replace(/[^\d+]/g, ''), id: 'fu-call' }, icon('phone'), 'Call ' + r.phone),
+        wa && open ? el('a', { class: 'chip ic', id: 'fu-wa', href: 'https://wa.me/' + wa + '?text=' + encodeURIComponent(fuReminder_(r)), target: '_blank', rel: 'noopener',
+          onclick: () => setTimeout(() => fuSave(uid, { fu_reminded: today }, 'Reminder recorded'), 300) }, icon('chat'), s_(r.fu_reminded) ? 'Remind again (last ' + dmy(r.fu_reminded) + ')' : 'WhatsApp reminder') : null)
+        : el('p', { class: 'small muted' }, 'No mobile number on this summary. Add it with Edit to call her or send a reminder.'),
+      open ? el('div', { class: 'stack' },
+        el('button', { class: 'btn primary block', type: 'button', id: 'fu-came', onclick: came }, 'She came'),
+        st !== 'missed' ? el('button', { class: 'btn block', type: 'button', id: 'fu-missed', onclick: () => fuSave(uid, { fu_status: 'M', fu_note: 'Did not come on ' + dmy(r.fu_date) }, 'Marked missed: she stays on the list until rebooked or closed') }, 'She did not come') : null,
+        el('button', { class: 'btn block', type: 'button', id: 'fu-move', onclick: move }, st === 'missed' || st === 'overdue' ? 'Rebook' : 'Change the date'),
+        el('button', { class: 'btn danger block', type: 'button', id: 'fu-close', onclick: closeIt }, 'Close: no more follow-up'))
+        : el('div', { class: 'stack' }, el('button', { class: 'btn primary block', type: 'button', id: 'fu-book', onclick: move }, st === 'done' ? 'Book another visit' : 'Book a follow-up')),
+      s_(r.fu_log) ? el('details', { class: 'fulog' }, el('summary', null, 'History'), el('div', { class: 'pre small', id: 'fu-log' }, r.fu_log)) : null,
+      el('div', { class: 'acts' }, el('button', { class: 'btn', type: 'button', onclick: () => { closeModal(); if (cur().name !== 'view') go('view', { uid }); } }, 'Open summary'), el('button', { class: 'btn', type: 'button', id: 'fu-x', onclick: closeModal }, 'Close')));
+  }
+  function came() {
+    let reason = 'Postnatal check (6 weeks)';
+    show(el('p', null, 'Book her next visit, or finish the follow-up.'),
+      el('div', { class: 'stack' }, el('button', { class: 'btn primary block', type: 'button', id: 'fu-done', onclick: () => fuSave(uid, { fu_status: 'A', fu_note: 'Came on ' + stamp }, 'Follow-up complete') }, 'No more visits: mark attended')),
+      el('div', { class: 'lab' }, 'Or book the next visit for'), reasons((x) => { reason = x; }, reason),
+      datePicker('fu-next', (iso) => fuSave(uid, { fu_date: iso, fu_for: reason, fu_status: '', fu_reminded: '', fu_note: 'Came on ' + stamp + (s_(r.fu_for) ? ' (' + r.fu_for + ')' : '') }, 'Next visit booked: ' + fuDayTxt(iso))), back());
+  }
+  function move() {
+    let reason = s_(r.fu_for) || 'Wound check';
+    show(el('div', { class: 'lab' }, 'Visit for'), reasons((x) => { reason = x; }, reason), el('div', { class: 'lab' }, 'New date'),
+      datePicker('fu-new', (iso) => fuSave(uid, { fu_date: iso, fu_for: reason, fu_status: '', fu_reminded: '', fu_note: st === 'missed' || st === 'overdue' ? 'Rebooked on ' + stamp + ' after a missed visit' : s_(r.fu_note) }, 'Booked: ' + fuDayTxt(iso))), back());
+  }
+  function closeIt() {
+    show(el('p', null, 'Why is the follow-up closed? She leaves the list; the summary itself is not changed.'),
+      el('div', { class: 'stack' }, ['Seen elsewhere', 'Could not be reached', 'Declined further visits', 'Not needed'].map((x) => el('button', { class: 'btn block', type: 'button', onclick: () => fuSave(uid, { fu_status: 'X', fu_note: x + ' (' + stamp + ')' }, 'Follow-up closed') }, x))), back());
+  }
+  const m = $('#modal');
+  m.replaceChildren(el('div', { class: 'sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Follow-up' }, el('h3', null, r.name || 'Follow-up'), body));
+  m.hidden = false; main();
 }
 
 // ------------------------------------------------------------------ settings and the PI's buttons screen
@@ -924,7 +1113,7 @@ function buildPdf(r, imgs) {
     : k === 'physical_findings' ? s_(r[k]).split('\n').map((x) => x.trim().replace(/[.,;]+$/, '')).filter(Boolean).join(', ')
     : s_(r[k]));
   const LEFT = [[colDef('final_diagnoses').label, text('final_diagnoses')], [colDef('history').label, text('history')], [colDef('physical_findings').label, text('physical_findings')], ['Investigations', labsLine_(r)]];
-  const RIGHT = [[colDef('course').label, text('course')], [colDef('follow_up').label, text('follow_up')]];
+  const RIGHT = [[colDef('course').label, text('course')], [colDef('follow_up').label, [fuLine_(r), text('follow_up')].filter(Boolean).join('\n')]];
   const urdu = (imgs && imgs.urdu) || [];
   const meds = s_(r.discharge_meds).split('\n').map((l) => l.trim()).filter(Boolean).map((l, i) => ({ en: medEnglish_(l), ur: urdu[i] && urdu[i].bytes && urdu[i].bytes.length ? urdu[i] : null }));
   const GAP = 18, C2 = (CW - GAP) / 2, ENW = CW * 0.56, URX = M + ENW + 10, URW = PW - M - URX, SIG = 78, FOOT = M;                     // no footer: the page ends with the signature
@@ -941,7 +1130,7 @@ function buildPdf(r, imgs) {
     if (flow) need(34);
     headW = w;
     head(x, y, bk[0], fs); y -= 15;
-    wrap(bk[1] || '-', fs, w - 4).forEach((l) => { if (flow) need(lhOf(fs) + 2); T_(x + 3, y, l, fs, false); y -= lhOf(fs); });
+    wrap(bk[1] || '-', fs, w - 4).forEach((l) => { if (flow) need(lhOf(fs) + 2); T_(x + 3, y, l, fs, /^Next visit:/.test(l)); y -= lhOf(fs); });
     y -= 8;
   };
   const drawMeds = (fs, flow) => {
