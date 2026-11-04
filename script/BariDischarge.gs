@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.2
+ *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.3
  *  4 November 2026. One file: paste into the spreadsheet's Apps Script editor.
  * ============================================================================
  *  Keeps one row per discharge in the tab DISCHARGES, with the same headings as the
@@ -31,8 +31,8 @@
  */
 
 const CFG = {
-  VERSION: '1.2',
-  SCHEMA_VER: 3,                      // 2: obstetric layout (G/P, weeks, co-morbid, operation date, Hb/TLC/PLT); 3: follow-up calendar and patient phone
+  VERSION: '1.3',
+  SCHEMA_VER: 4,                      // 2: obstetric layout (G/P, weeks, co-morbid, operation date, Hb/TLC/PLT); 3: follow-up calendar and patient phone; 4: verification code
   TZ: 'Asia/Karachi',
   MENU: 'Bari Discharge',
   DS_PREFIX: 'BH-',
@@ -100,6 +100,7 @@ const SCHEMA = [{ tab: 'DISCHARGES', title: 'Obstetric discharge summaries', col
   col('updated_at', 'Last changed at', 'sys'),
   col('finalised_by', 'Finalised by', 'sys'),
   col('finalised_at', 'Finalised at', 'sys'),
+  col('vcode', 'Verification code', 'vcode'),
   col('fu_log', 'Follow-up history', 'sys')
 ] }];
 const DCOLS = SCHEMA[0].cols;
@@ -158,6 +159,7 @@ function validateValue_(c, v, row) {
     }
     return '';
   }
+  if (c.type === 'vcode') return /^[0-9a-f]{16}$/.test(s) ? '' : 'Verification code: made by the app';
   if (c.type === 'phone') return /^\+?[0-9][0-9 -]{8,16}[0-9]$/.test(s) && s.replace(/\D/g, '').length >= 10 && s.replace(/\D/g, '').length <= 13 ? '' : c.label + ': 10 to 13 digits, e.g. 0300 1234567';
   if (c.type === 'age') return /^\d{1,3}(\.\d)?( ?(y|yr|yrs|years?|m|mo|months?|d|days?|w|wk|weeks?))?$/i.test(s) && parseFloat(s) <= 120 ? '' : 'Age: a number, optionally followed by years, months, weeks or days';
   return '';
@@ -237,6 +239,18 @@ function fuReminder_(row) {
     '\n\u0628\u0627\u0631\u06cc \u06c1\u0633\u067e\u062a\u0627\u0644: \u0622\u067e \u06a9\u0627 \u0686\u06cc\u06a9 \u0627\u067e ' + isoFromDay_(d).split('-').reverse().join('-') + ' \u06a9\u0648 \u06c1\u06d2\u06d4 \u062f\u0646 \u0628\u062f\u0644\u0646\u06d2 \u06a9\u06d2 \u0644\u06cc\u06d2 \u0641\u0648\u0646 \u06a9\u0631\u06cc\u06ba: ' + CFG.HOSPITAL.phone.replace(/^Ph: /, '');
 }
 
+// ---------------------------------------------------------------- verification (shared with the phone)
+// Every final summary carries a QR code. Scanning it opens the hospital's verification page, which asks the workbook whether the summary
+// is real and still current. The QR holds no patient data: only a random code (finding the summary) and a fingerprint of what was printed.
+// The fingerprint covers every printed clinical field (not the follow-up, which changes as visits happen), so a copy printed before an
+// amendment shows as out of date. The page shows only the details needed to compare with the paper (VERIFY_SHOW).
+const VERIFY_PAGE = 'https://ir1s-vir1s.github.io/bari-discharge/v.html';
+const VERIFY_SHOW = ['name', 'father_husband', 'age', 'admit_date', 'op_date', 'discharge_date', 'consultant', 'final_diagnoses'];
+const FP_KEYS = DCOLS.filter(function (c) { return c.type !== 'sys' && c.type !== 'vcode' && FU_KEYS.indexOf(c.key) < 0 && c.key !== 'mo_name'; }).map(function (c) { return c.key; });
+function printedText_(row) { return FP_KEYS.map(function (k) { return k + '=' + str_(row[k]).replace(/\r\n?/g, '\n').toUpperCase().replace(/\s+/g, ' '); }).join('\u001f'); }
+function vcodeShow_(c) { return str_(c).toUpperCase().replace(/(.{4})(?=.)/g, '$1-'); }       // 3F9A-01C2-77DE-B410
+function verifyUrl_(api, row, fp) { const m = /\/macros\/s\/([\w-]+)\/exec/.exec(str_(api)); return m && str_(row.vcode) ? VERIFY_PAGE + '#' + m[1] + '.' + row.vcode + '.' + fp : ''; }
+
 // ---------------------------------------------------------------- roles (shared with the phone)
 const ROLE_NAMES = { pi: 'PI', consultant: 'Consultant', mo: 'Medical officer' };
 function roleCan_(role, what) {
@@ -276,7 +290,7 @@ function onOpen() {                      // used only when this file is pasted o
   m.addToUi();
 }
 // What the loader calls. Every entry point must be listed here.
-const RELEASE_NOTE = 'follow-up calendar: next visit date, reason, patient mobile, attended or missed, WhatsApp reminder';   // shown by "PI: install update"
+const RELEASE_NOTE = 'QR verification of final summaries; follow-up calendar (next visit, patient mobile, missed and rebook, WhatsApp reminder)';   // shown by "PI: install update"
 function exports_() {
   return { VERSION: CFG.VERSION, RELEASE_NOTE: RELEASE_NOTE, SCHEMA_VER: CFG.SCHEMA_VER, MENU: CFG.MENU, MENU_ITEMS: MENU_ITEMS,
     setup: setup, menuUsers: menuUsers, menuInvite: menuInvite, menuRevoke: menuRevoke, menuApproveQuick: menuApproveQuick, doGet: doGet, doPost: doPost };
@@ -347,11 +361,29 @@ function buildAll_(ss) {
   if (st.getLastRow() < 2) st.getRange(2, 1, SEED_STAFF.length, STAFF_COLS.length).setValues(SEED_STAFF);
   st.getRange(1, 1, 1, STAFF_COLS.length).setNotes([['Name as printed', 'consultant or mo', 'Printed under the name, e.g. Gynaecologist & Obstetrician', 'Degrees, e.g. MBBS, FCPS', 'Personal number printed on that consultant\u2019s summaries']]);
   followTab_(ss);
+  backfillVcodes_(ss);
+  verifyTab_(ss);
   const lg = sheet_(ss, 'LOG', ['at', 'user', 'action', 'ds_no', 'detail']);
   try {                                                  // only the PI may edit the system tabs by hand
     [lg].forEach(function (sh) { const p = sh.protect().setDescription('system'); p.getEditors().forEach(function (u) { if ((u.getEmail() || '').toLowerCase() !== piEmail_()) p.removeEditor(u); }); });
   } catch (e) { /* protection is a convenience; the phones never depend on it */ }
   const s1 = ss.getSheetByName('Sheet1'); if (s1 && s1.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(s1);
+}
+// The VERIFY tab records which web app answers the QR codes. The verification page trusts only that one, so a forger cannot point a
+// copied QR at a look-alike web app of their own. Changing the deployment means adding the new one to the page (v.js, TRUSTED).
+function verifyTab_(ss) {
+  let sh = ss.getSheetByName('VERIFY');
+  if (!sh) sh = ss.insertSheet('VERIFY');
+  const m = /\/macros\/s\/([\w-]+)\/exec/.exec(props_().getProperty('API_URL') || '');
+  sh.getRange(1, 1, 4, 2).setValues([['Verification page', VERIFY_PAGE], ['Web app deployment', m ? m[1] : '(made with the first invitation)'],
+    ['What the page shows', VERIFY_SHOW.map(function (k) { return colOf_(k).label; }).join(', ')], ['Every scan', 'is written to LOG as "verify: valid / amended / withdrawn / not found"']]);
+}
+// Final summaries written before verification existed get a code, so their next printed copy carries a QR.
+function backfillVcodes_(ss) {
+  const sh = ss.getSheetByName('DISCHARGES'), keys = DCOLS.map(function (c) { return c.key; }), col = keys.indexOf('vcode') + 1;
+  let n = 0;
+  dRows_(ss).forEach(function (r) { if (r.status === 'F' && !str_(r.vcode)) { sh.getRange(r._row, col).setValue(randomHex_(16)); n++; } });
+  return n;
 }
 // A live view of every open follow-up, soonest first. It reads DISCHARGES, so it never needs saving.
 function colLetter_(i) { let s = '', n = i + 1; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }
@@ -664,6 +696,7 @@ function doPost(e) {
   try { req = JSON.parse(e && e.postData ? e.postData.contents : '{}'); } catch (err) { return appJson_({ ok: false, error: 'bad request' }); }
   try {
     if (req.op === 'join') return appJson_(appJoin_(req));
+    if (req.op === 'verify') return appJson_(appVerify_(req));
     const u = appUser_(req.token);
     if (!u) return appJson_({ ok: false, error: 'not authorised', code: 401 });
     if (req.op === 'hello') return appJson_({ ok: true, schema: wbSchema_(), version: CFG.VERSION });
@@ -687,6 +720,21 @@ function doPost(e) {
   }
 }
 function withLock_(fn) { const l = LockService.getScriptLock(); l.waitLock(20000); try { return fn(); } finally { l.releaseLock(); } }
+
+// Anyone holding the paper can ask; no account. Only what is needed to compare with the paper comes back, and only for a code that exists.
+function appVerify_(req) {
+  const code = str_(req.code).toLowerCase(), fp = str_(req.fp).toUpperCase();
+  if (!/^[0-9a-f]{16}$/.test(code)) return { ok: true, state: 'unknown' };
+  const r = dRows_(ss_()).filter(function (x) { return str_(x.vcode) === code; })[0];
+  const H = CFG.HOSPITAL, base = { ok: true, hospital: H.name, address: H.address, phone: H.phone, code: vcodeShow_(code) };
+  if (!r) { logIt_('', 'verify: not found', '', code.slice(0, 4)); return Object.assign(base, { state: 'unknown' }); }
+  const now = sha256_(printedText_(r)).slice(0, 8).toUpperCase();
+  const state = r.status !== 'F' ? 'withdrawn' : fp && fp !== now ? 'amended' : 'valid';
+  logIt_('', 'verify: ' + state, r.ds_no, '');
+  const out = Object.assign(base, { state: state, ds_no: r.ds_no, finalised_on: str_(r.finalised_at).slice(0, 10), fp: now });
+  if (state !== 'withdrawn') { out.details = VERIFY_SHOW.map(function (k) { const c = colOf_(k); return [c.label, c.type === 'date' ? str_(r[k]).split('-').reverse().join('-') : str_(r[k])]; }).filter(function (p) { return p[1]; }); out.gp = gpLine_(r); }
+  return out;
+}
 
 function appJoin_(req) {
   const P = props_(), code = str_(req.code);
@@ -739,7 +787,8 @@ function appPull_(u) {
 function appSearch_(u, req) {
   const q = str_(req.q).toLowerCase();
   if (q.length < 2) return { ok: false, error: 'type at least 2 letters' };
-  const rows = dRows_(ss_()).filter(function (r) { return (r.name + ' ' + r.father_husband + ' ' + r.ds_no).toLowerCase().indexOf(q) >= 0; })
+  const vq = /^[0-9a-f]{4}(-?[0-9a-f]{4}){1,3}$/.test(q) ? q.replace(/-/g, '') : '';      // a verification code read out over the phone
+  const rows = dRows_(ss_()).filter(function (r) { return (r.name + ' ' + r.father_husband + ' ' + r.ds_no).toLowerCase().indexOf(q) >= 0 || (vq.length >= 8 && str_(r.vcode).indexOf(vq) === 0); })
     .slice(-50).map(function (r) { delete r._row; return r; });
   return { ok: true, rows: rows };
 }
@@ -771,9 +820,12 @@ function appPush_(u, changes) {
         if (conflicts.length) { res.status = 'conflict'; res.errors = conflicts.map(function (k) { return colOf_(k).label + ' was changed by ' + (row.updated_by || 'someone else'); }); res.current = row; delete res.current._row; results.push(res); return; }
         const next = JSON.parse(JSON.stringify(row));
         Object.keys(vals).forEach(function (k) { next[k] = k === 'status' || colOf_(k).type === 'code' || colOf_(k).type === 'multi' ? code_(vals[k]) : String(vals[k]).replace(/\r\n?/g, '\n').trim(); });
+        if (str_(next.vcode) && rows.some(function (x) { return x.uid !== uid && str_(x.vcode) === str_(next.vcode); })) throw new Error('verification code already in use; finalise again');
         const fuOnly = before && keys.every(function (k) { return FU_KEYS.indexOf(k) >= 0 || k === 'fu_log' || str_(before[k]) === str_(next[k]); });
         if (before && before.status === 'F' && !fuOnly && !roleCan_(u.role, 'finalise')) throw new Error('this summary is final; only a consultant can change it (follow-up details can still be changed)');
         if (next.status === 'F' && (!before || before.status !== 'F') && !roleCan_(u.role, 'finalise')) throw new Error('only a consultant can finalise');
+        if (before && str_(before.vcode) && str_(next.vcode) !== str_(before.vcode)) throw new Error('the verification code of a summary cannot change');
+        if (next.status === 'F' && !str_(next.vcode)) next.vcode = randomHex_(16);
         const probs = rowProblems_(next);
         if (probs.length) throw new Error(probs.join('; '));
         if (next.status === 'F') { const g = finalGaps_(next); if (g.length) throw new Error('to finalise, fill in: ' + g.join(', ')); }

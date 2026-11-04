@@ -1,0 +1,24 @@
+:root { --bg: #f5f6f4; --card: #fff; --ink: #1d2320; --muted: #5b625e; --line: #d9ddd9; --green: #2f6f48; --ok: #1f5c3a; --ok-t: #e3f2e8; --bad: #b3261e; --bad-t: #fdecea; --amb: #8a5a00; --amb-t: #fff4d6; }
+@media (prefers-color-scheme: dark) { :root { --bg: #111513; --card: #1b201d; --ink: #e8ece9; --muted: #a9b1ac; --line: #343b37; --green: #6cc08d; --ok: #8fd6a8; --ok-t: #15301f; --bad: #ff8a80; --bad-t: #3a1715; --amb: #f2c14e; --amb-t: #33290f; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.hd { display: flex; gap: 12px; align-items: center; padding: 14px 16px; background: var(--card); border-bottom: 3px solid var(--green); }
+.hd .logo { width: 52px; height: auto; border-radius: 6px; }
+.hd b { display: block; color: var(--green); font-size: 19px; letter-spacing: .02em; }
+.hd span { display: block; font-size: 13px; color: var(--muted); }
+main { max-width: 620px; margin: 0 auto; padding: 14px; }
+.res { border-radius: 14px; padding: 14px 16px; margin: 6px 0 12px; }
+.res h1 { font-size: 21px; margin: 0 0 4px; }
+.res p { margin: 4px 0; }
+.res.valid { background: var(--ok-t); color: var(--ok); } .res.amended { background: var(--amb-t); color: var(--amb); }
+.res.withdrawn, .res.unknown, .res.fail { background: var(--bad-t); color: var(--bad); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin: 10px 0; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 6px; }
+.kv { display: flex; gap: 10px; padding: 5px 0; border-bottom: 1px dashed var(--line); }
+.kv:last-child { border-bottom: 0; }
+.kv .k { width: 40%; color: var(--muted); font-size: 14px; flex: none; }
+.kv .v { white-space: pre-wrap; font-weight: 600; }
+.muted { color: var(--muted); } .small { font-size: 13px; }
+ul.tips { padding-left: 20px; margin: 6px 0; } ul.tips li { margin: 4px 0; }
+.ft { max-width: 620px; margin: 0 auto; padding: 4px 16px 30px; font-size: 12px; color: var(--muted); }
+a { color: var(--green); }

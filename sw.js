@@ -1,7 +1,7 @@
 // Offline cache for the app shell. Patient data never pass through this file: requests to the
 // workbook go straight to the network and are never cached.
-const CACHE = 'bari-9e546f400624';
-const FILES = ["./", "index.html", "app.js", "app.css", "logic.js", "manifest.webmanifest", "logo.jpg", "qr.jpg", "urdu.woff2", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"];
+const CACHE = 'bari-a18c23284f46';
+const FILES = ["./", "index.html", "app.js", "app.css", "logic.js", "qrcode.js", "manifest.webmanifest", "logo.jpg", "qr.jpg", "urdu.woff2", "v.html", "v.js", "v.css", "v-trust.js", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "apple-touch-icon.png"];
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES.map((f) => new Request(f, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });

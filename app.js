@@ -3,8 +3,8 @@
  * workbook (BariDischarge.gs web app) whenever the phone is online. Fields, codes and checks come from
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
-const APP_VERSION = '1.2';
-const BUILD_ID = '9e546f400624';
+const APP_VERSION = '1.3';
+const BUILD_ID = 'a18c23284f46';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -675,7 +675,7 @@ function finaliseForm() {
     !s_(v.fu_date) ? el('p', { class: 'banner warn', id: 'fin-nofu' }, 'No follow-up date: she will not appear on the follow-up calendar. Cancel and set one under Next follow-up, or finalise without.') : null,
     can('template') ? el('div', null, tplBox, tplName, el('p', { class: 'small muted' }, 'A template keeps the clinical sections only, never the patient\u2019s details. The same name replaces an older template.')) : null),
   [['Cancel', null], ['Finalise', () => {
-    v.status = 'F'; T.form.dirty = true;
+    v.status = 'F'; if (!s_(v.vcode)) v.vcode = rid().slice(0, 16); T.form.dirty = true;     // the verification code is made here, so the PDF carries its QR even offline
     const sections = {}; SECTIONS.forEach((k) => { sections[k] = s_(v[k]); });
     if (saveForm(false)) {
       const uid = T.form.uid; T.form = null; T.nav.pop(); T.nav.push({ name: 'view', p: { uid } }); render(); toast('Finalised');
@@ -700,7 +700,8 @@ function viewScreen(p) {
         comorbidOf_(r).length ? el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Co-morbid'), el('span', { class: 'v' }, comorbidOf_(r).map((c) => (COMORBID.filter((x) => x[0] === c)[0] || [c, c])[1]).join(', '))) : null,
         ['date', 'admit_date', 'op_date', 'discharge_date', 'consultant', 'mo_name'].map(line),
         labsLine_(r) ? el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Investigations'), el('span', { class: 'v' }, labsLine_(r))) : null,
-        final ? el('div', { class: 'small muted' }, 'Finalised by ' + r.finalised_by + ' on ' + s_(r.finalised_at)) : null),
+        final ? el('div', { class: 'small muted' }, 'Finalised by ' + r.finalised_by + ' on ' + s_(r.finalised_at)) : null,
+        final && s_(r.vcode) ? el('div', { class: 'small muted', id: 'v-code' }, 'Verification code ' + vcodeShow_(r.vcode) + ': printed with a QR that anyone can scan to check this summary') : null),
       SECTIONS.map((k) => (s_(r[k]) ? el('div', { class: 'card' }, el('h2', null, colDef(k).label), el('div', { class: 'pre' }, r[k])) : null)),
       fuViewCard(r),
       el('div', { class: 'stack' },
@@ -1020,7 +1021,23 @@ function jpegSize(b) { let i = 2; while (i < b.length) { if (b[i] !== 0xff) { i+
 const ASSETS = {};
 async function asset(name) { if (!ASSETS[name]) { try { ASSETS[name] = new Uint8Array(await (await fetch(name)).arrayBuffer()); } catch (e) { ASSETS[name] = new Uint8Array(0); } } return ASSETS[name]; }
 async function logoBytes() { return asset('logo.jpg'); }
-async function pdfImages(r) { return { logo: await asset('logo.jpg'), qr: await asset('qr.jpg'), urdu: r ? await urduImages(r) : [] }; }
+async function pdfImages(r) { return { logo: await asset('logo.jpg'), qr: await asset('qr.jpg'), urdu: r ? await urduImages(r) : [], fp: r ? await fingerprint(r) : '' }; }
+// The fingerprint of what is printed, the same one the workbook works out when the QR is scanned
+async function fingerprint(r) { const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(printedText_(r)))); return Array.from(h.slice(0, 4), (b) => b.toString(16).padStart(2, '0')).join('').toUpperCase(); }
+// QR as vector squares (crisp at any print size). Runs of dark modules on a row are drawn as one rectangle.
+function qrOps(text, x, yTop, size) {
+  const q = qrcode(0, 'M'); q.addData(text); q.make();
+  const n = q.getModuleCount(), c = size / n, out = ['0 0 0 rg'];
+  for (let r0 = 0; r0 < n; r0++) {
+    for (let c0 = 0; c0 < n; c0++) {
+      if (!q.isDark(r0, c0)) continue;
+      let e = c0; while (e + 1 < n && q.isDark(r0, e + 1)) e++;
+      out.push((x + c0 * c).toFixed(3) + ' ' + (yTop - (r0 + 1) * c).toFixed(3) + ' ' + ((e - c0 + 1) * c).toFixed(3) + ' ' + c.toFixed(3) + ' re');
+      c0 = e;
+    }
+  }
+  out.push('f'); return { ops: out.join('\n'), n };
+}
 // Each medicine's Urdu wording is drawn by the phone with the bundled Noto Nastaliq Urdu font and placed in the PDF as a small picture
 // (the PDF's own fonts have no Urdu letters, and the phone shapes Nastaliq correctly).
 async function urduImages(r) {
@@ -1164,6 +1181,16 @@ function buildPdf(r, imgs) {
     drawBlock(M, CW, RIGHT[1], 9.5, true);
   }
   need(SIG); y -= 18;
+  const vurl = final && imgs && imgs.fp ? verifyUrl_(S && S.cfg && S.cfg.api, r, imgs.fp) : '';
+  if (vurl) {                                            // verification QR, bottom left: no patient data in it, only the code and the fingerprint
+    const qs = 66, qy = y + 12, qx = M, tx = M + qs + 10;
+    ops.push(qrOps(vurl, qx, qy, qs).ops);
+    Tk(tx, qy - 9, 'SCAN TO VERIFY THIS SUMMARY', 8, true, GREEN);
+    Tk(tx, qy - 22, 'Verification code', 7, false, GREY);
+    T_(tx, qy - 33, vcodeShow_(r.vcode), 10, true);
+    Tk(tx, qy - 45, 'Check the page opens at ' + VERIFY_PAGE.replace(/^https:\/\//, '').replace(/\/v\.html$/, ''), 6.5, false, GREY);
+    Tk(tx, qy - 54, 'or quote the code on ' + CFG.HOSPITAL.phone.replace(/^Ph: /, ''), 6.5, false, GREY);
+  }
   lineH(PW - M - 200, y, PW - M);
   Tk(PW - M - 200, y - 12, 'Signature of Consultant', 8.5, true, GREY);
   if (r.consultant) {                                   // the consultant's details, printed once, here
