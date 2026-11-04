@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.8
+ *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.9
  *  4 November 2026. One file: paste into the spreadsheet's Apps Script editor.
  * ============================================================================
  *  Keeps one row per discharge in the tab DISCHARGES, with the same headings as the
@@ -35,7 +35,7 @@
  */
 
 const CFG = {
-  VERSION: '1.8',
+  VERSION: '1.9',
   SCHEMA_VER: 4,                      // 2: obstetric layout (G/P, weeks, co-morbid, operation date, Hb/TLC/PLT); 3: follow-up calendar and patient phone; 4: verification code
   TZ: 'Asia/Karachi',
   MENU: 'Bari Discharge',
@@ -272,6 +272,17 @@ function verifyUrl_(api, row, fp) { const m = /\/macros\/s\/([\w-]+)\/exec/.exec
 // ---------------------------------------------------------------- certificate wording (shared with the phone)
 // Who may delete a summary: the PI any; a consultant any draft; a medical officer only a draft they wrote.
 function canDelete_(role, row, me) { return role === 'pi' || (str_(row.status) !== 'F' && (role === 'consultant' || !str_(row.ds_no) || str_(row.created_by) === str_(me))); }
+// Search: a bare number finds the summary or certificate with that number, so nobody types BH- or MC- or the zeros
+// ("12", "bh12", "BH-0012" all find BH-0012). Four or more digits also match the patient's mobile.
+function searchNum_(q) { const d = str_(q).toLowerCase().replace(/^(bh|mc)[-\s]?/, ''); return /^\d{1,6}$/.test(d) ? +d : null; }
+function numberOf_(no) { const m = /(\d+)$/.exec(str_(no)); return m ? +m[1] : null; }
+function searchHit_(q, texts, no, phone) {
+  const t = str_(q).toLowerCase(), n = searchNum_(t), digits = t.replace(/\D/g, '');
+  if (n !== null && no && numberOf_(no) === n) return 2;                               // exact number: listed first
+  if (t.length >= 2 && texts.join(' ').toLowerCase().indexOf(t) >= 0) return 1;
+  if (digits.length >= 4 && /^[\d\s+-]+$/.test(t) && str_(phone).replace(/\D/g, '').indexOf(digits) >= 0) return 1;
+  return 0;
+}
 function codeLabel2_(list, v) { const p = list.filter(function (x) { return x[0] === code_(v); })[0]; return p ? p[1] : str_(v); }
 function dmy_(iso) { return str_(iso).split('-').reverse().join('-'); }
 function certDays_(c) { const a = dayNo_(c.from_date), b = dayNo_(c.to_date); return a !== null && b !== null ? b - a + 1 : 0; }
@@ -375,7 +386,7 @@ function onOpen() {                      // used only when this file is pasted o
   m.addToUi();
 }
 // What the loader calls. Every entry point must be listed here.
-const RELEASE_NOTE = 'audit trail (old and new values, hash-chained); delete a summary from the phone (kept in DELETED); menu item to clear test records and start over; medical certificates (sick, maternity, fitness, attendant), also for walk-in patients; QR verification of final summaries; follow-up calendar (next visit, patient mobile, missed and rebook, WhatsApp reminder)';   // shown by "PI: install update"
+const RELEASE_NOTE = 'search by number without BH- (also mobile); audit trail (old and new values, hash-chained); delete a summary from the phone (kept in DELETED); menu item to clear test records and start over; medical certificates (sick, maternity, fitness, attendant), also for walk-in patients; QR verification of final summaries; follow-up calendar (next visit, patient mobile, missed and rebook, WhatsApp reminder)';   // shown by "PI: install update"
 function exports_() {
   return { VERSION: CFG.VERSION, RELEASE_NOTE: RELEASE_NOTE, SCHEMA_VER: CFG.SCHEMA_VER, MENU: CFG.MENU, MENU_ITEMS: MENU_ITEMS,
     setup: setup, menuUsers: menuUsers, menuInvite: menuInvite, menuRevoke: menuRevoke, menuApproveQuick: menuApproveQuick, menuReset: menuReset, menuAuditCheck: menuAuditCheck, doGet: doGet, doPost: doPost };
@@ -1042,9 +1053,9 @@ function appPull_(u) {
 }
 function appSearch_(u, req) {
   const q = str_(req.q).toLowerCase();
-  if (q.length < 2) return { ok: false, error: 'type at least 2 letters' };
+  if (q.length < 2 && searchNum_(q) === null) return { ok: false, error: 'type at least 2 letters or a number' };
   const vq = /^[0-9a-f]{4}(-?[0-9a-f]{4}){1,3}$/.test(q) ? q.replace(/-/g, '') : '';      // a verification code read out over the phone
-  const rows = dRows_(ss_()).filter(function (r) { return (r.name + ' ' + r.father_husband + ' ' + r.ds_no).toLowerCase().indexOf(q) >= 0 || (vq.length >= 8 && str_(r.vcode).indexOf(vq) === 0); })
+  const rows = dRows_(ss_()).filter(function (r) { return searchHit_(q, [r.name, r.father_husband, r.ds_no], r.ds_no, r.phone) > 0 || (vq.length >= 8 && str_(r.vcode).indexOf(vq) === 0); })
     .slice(-50).map(function (r) { delete r._row; return r; });
   return { ok: true, rows: rows };
 }

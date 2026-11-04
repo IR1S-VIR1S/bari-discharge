@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.7';
-const BUILD_ID = 'ca76e0fb2ba6';
+const BUILD_ID = '0dd5bc1078e0';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -536,7 +536,7 @@ function homeScreen() {
     bottomNav('home'));
 }
 function searchBox() {
-  const inp = el('input', { type: 'search', id: 'search', placeholder: 'Search name or BH number', value: T.q, autocomplete: 'off' });
+  const inp = el('input', { type: 'search', id: 'search', placeholder: 'Name, number (e.g. 12) or mobile', value: T.q, autocomplete: 'off', enterkeyhint: 'search' });
   inp.addEventListener('input', () => { T.q = inp.value; paintResults(); });
   setTimeout(paintResults, 0);
   return inp;
@@ -544,9 +544,10 @@ function searchBox() {
 function paintResults() {
   const box = $('#results'); if (!box) return;
   const q = s_(T.q).toLowerCase();
-  if (q.length < 2) { box.replaceChildren(); return; }
-  const hits = records().filter((r) => (r.name + ' ' + r.father_husband + ' ' + r.ds_no).toLowerCase().indexOf(q) >= 0).sort((a, b) => sortKey(b).localeCompare(sortKey(a)));
-  box.replaceChildren(el('section', { class: 'feed' }, el('h2', null, hits.length + ' found on this phone'), hits.slice(0, 30).map(card),
+  if (q.length < 2 && searchNum_(q) === null) { box.replaceChildren(); return; }
+  const hits = records().map((r) => [r, searchHit_(q, [r.name, r.father_husband, r.ds_no], r.ds_no, r.phone)]).filter((x) => x[1]).sort((a, b) => b[1] - a[1] || sortKey(b[0]).localeCompare(sortKey(a[0]))).map((x) => x[0]);
+  const n = searchNum_(q);
+  box.replaceChildren(el('section', { class: 'feed' }, el('h2', null, hits.length + ' found on this phone' + (n !== null ? ' (number ' + CFG.DS_PREFIX + ('000' + n).slice(-Math.max(4, String(n).length)) + ')' : '')), hits.slice(0, 30).map(card),
     el('button', { class: 'btn block', type: 'button', id: 'search-online', onclick: () => searchOnline(q) }, 'Search older summaries in the workbook')));
 }
 async function searchOnline(q) {
@@ -1178,11 +1179,12 @@ function certScreen(p) {
 // The Certificates tab: every certificate on this phone, newest first, and the walk-in button.
 function certsScreen() {
   const all = ((S.server && S.server.certs) || []).slice().sort((a, b) => (b.cert_no || '').localeCompare(a.cert_no || ''));
-  const box = el('input', { type: 'search', id: 'cert-search', placeholder: 'Search name, MC number or code', value: T.cq || '', autocomplete: 'off' });
+  const box = el('input', { type: 'search', id: 'cert-search', placeholder: 'Name, number (e.g. 3) or code', value: T.cq || '', autocomplete: 'off' });
   box.addEventListener('input', () => { T.cq = box.value; const list = $('#cert-list'); if (list) list.replaceWith(certList()); });
   function certList() {
     const qq = s_(T.cq).toLowerCase(), code = qq.length >= 9 && /^[0-9a-f-]+$/.test(qq) ? qq.replace(/-/g, '') : '';
-    const h = qq.length < 2 ? all : all.filter((c) => (c.patient + ' ' + c.guardian + ' ' + c.cert_no + ' ' + c.ds_no).toLowerCase().indexOf(qq) >= 0 || (code && s_(c.vcode).indexOf(code) === 0));
+    const scored = all.map((c) => [c, Math.max(searchHit_(qq, [c.patient, c.guardian, c.cert_no, c.ds_no], c.cert_no, ''), searchNum_(qq) !== null && numberOf_(c.ds_no) === searchNum_(qq) ? 1 : 0, code && s_(c.vcode).indexOf(code) === 0 ? 2 : 0)]);
+    const h = qq.length < 2 && searchNum_(qq) === null ? all : scored.filter((x) => x[1]).sort((a, b) => b[1] - a[1]).map((x) => x[0]);
     return el('section', { class: 'card', id: 'cert-list' }, el('h2', null, (qq.length < 2 ? 'Issued (' : 'Found (') + h.length + ')'),
       h.length ? h.map((c) => certLine(c, true)) : el('p', { class: 'muted small' }, all.length ? 'None match.' : 'No certificates yet.'));
   }
