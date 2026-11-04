@@ -3,8 +3,8 @@
  * workbook (BariDischarge.gs web app) whenever the phone is online. Fields, codes and checks come from
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
-const APP_VERSION = '1.4';
-const BUILD_ID = '062d036eee80';
+const APP_VERSION = '1.7';
+const BUILD_ID = '7fd8485707a4';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -173,7 +173,7 @@ function pendingOf(uid) { return S.outbox.filter((c) => c.uid === uid)[0] || nul
 function records() {
   const m = {};
   serverRows().forEach((r) => { m[r.uid] = Object.assign({}, r); });
-  S.outbox.forEach((c) => { m[c.uid] = Object.assign(m[c.uid] || { uid: c.uid, ds_no: '', status: 'D' }, c.values, { _pending: c.status }); });
+  S.outbox.forEach((c) => { m[c.uid] = Object.assign(m[c.uid] || Object.assign({}, c.lastKnown || { uid: c.uid, ds_no: '', status: 'D' }), c.values, { _pending: c.status }); });
   return Object.keys(m).map((k) => m[k]);
 }
 function record(uid) { return records().filter((r) => r.uid === uid)[0] || null; }
@@ -219,7 +219,7 @@ async function sync() {
     for (let i = 0; i < pending.length; i += PUSH_BATCH) {
       const part = pending.slice(i, i + PUSH_BATCH), revs = {};
       part.forEach((c) => { revs[c.cid] = c.rev; });
-      const res = await api({ op: 'push', token: S.cfg.token, schema: CFG.SCHEMA_VER, changes: part.map((c) => ({ cid: c.cid, uid: c.uid, create: c.create, values: c.values, base: c.base, by: c.by })) }); still();
+      const res = await api({ op: 'push', token: S.cfg.token, schema: CFG.SCHEMA_VER, changes: part.map((c) => ({ cid: c.cid, uid: c.uid, create: c.create, values: c.values, base: c.base, by: c.by, reason: c.reason || '' })) }); still();
       if (!res.ok) throw Object.assign(new Error(res.error || 'the workbook refused'), { code: res.code });
       res.results.forEach((r) => {
         const c = S.outbox.filter((x) => x.cid === r.cid)[0];
@@ -231,6 +231,8 @@ async function sync() {
     }
     const pull = await api({ op: 'pull', token: S.cfg.token }); still();
     if (!pull.ok) throw Object.assign(new Error(pull.error || 'the workbook refused'), { code: pull.code });
+    const now = {}; pull.rows.forEach((x) => { now[x.uid] = true; });       // an edit whose summary vanished keeps the last copy seen, so it can be saved again
+    S.outbox.forEach((c) => { const o = serverRow(c.uid); if (!now[c.uid] && o) c.lastKnown = o; });
     S.server = { rows: pull.rows, quick: pull.quick, templates: pull.templates, staff: pull.staff, certs: pull.certs || [], roleName: pull.roleName, today: pull.today, at: Date.now() };
     S.cfg.role = pull.role; S.lastSync = Date.now(); T.syncError = '';
     await saveState();
@@ -659,7 +661,17 @@ function saveForm(stay) {
   if (!s_(v.name)) { toast('Enter the patient\u2019s name first.'); focusField('name'); return false; }
   const probs = formProblems(v);
   if (probs.length) { toast(probs[0]); return false; }
+  const sr = serverRow(F.uid), cur0 = record(F.uid) || {};
+  const amending = sr && sr.status === 'F' && EDITABLE.some((k) => FU_KEYS.indexOf(k) < 0 && v[k] !== undefined && s_(v[k]) !== s_(cur0[k]));
+  if (amending && !F.reason && stay) {                   // a final summary is being amended: the audit trail records why
+    const why = el('input', { type: 'text', id: 'amend-reason', maxlength: '120' });
+    modal('Why is this final summary being changed?', el('div', null, el('p', { class: 'small muted' }, 'The reason is kept in the audit trail with the old and new text.'), why,
+      el('div', { class: 'chips' }, ['Correcting a mistake', 'Adding information', 'Result received later'].map((x) => el('button', { class: 'chip', type: 'button', onclick: () => { why.value = x; } }, x)))),
+    [['Cancel', null], ['Save', () => { if (s_(why.value).length < 3) { toast('Give the reason'); return false; } F.reason = s_(why.value); saveForm(true); }, 'primary']]);
+    return false;
+  }
   queueSave(F.uid, v);
+  if (F.reason) { const c = pendingOf(F.uid); if (c) c.reason = F.reason; F.reason = ''; }
   F.dirty = false; F.isNew = false;
   saveState().then(() => sync());
   if (stay) { toast('Saved on this phone' + (navigator.onLine ? ', sending' : '. It is sent when there is a signal')); render(); }
@@ -700,7 +712,12 @@ function viewScreen(p) {
   return el('div', { class: 'page' }, topBar(r.ds_no || 'New summary', { back: true }),
     el('main', null,
       c && c.status === 'conflict' ? conflictCard(c) : null,
-      c && c.status === 'refused' ? el('div', { class: 'banner bad' }, 'Not accepted by the workbook: ' + (c.errors || []).join('. ') + '. Open Edit to fix it.') : null,
+      c && c.status === 'refused' ? (/no longer in the workbook/.test((c.errors || []).join(' '))
+        ? el('div', { class: 'banner bad', id: 'gone-banner' }, el('b', null, 'This summary is no longer in the workbook'), ' (it was deleted, or the records were cleared after a test run). ',
+          el('div', { class: 'chips' },
+            el('button', { class: 'chip', type: 'button', id: 'gone-drop', onclick: () => dropLocal(r.uid, 'Removed from this phone') }, 'Remove from this phone'),
+            el('button', { class: 'chip', type: 'button', id: 'gone-new', onclick: () => saveAsNew(r) }, 'Save it again as a new summary')))
+        : el('div', { class: 'banner bad' }, 'Not accepted by the workbook: ' + (c.errors || []).join('. ') + '. Open Edit to fix it.')) : null,
       el('div', { class: 'card' }, el('div', { class: 'vhead' }, el('b', null, r.name), el('span', { class: 'chip-st ' + (final ? 'fin' : 'draft') }, final ? 'final' : 'draft')),
         ['father_husband', 'age', 'phone', 'marital', 'religion'].map(line),
         gpLine_(r) ? el('div', { class: 'kv' }, el('span', { class: 'k' }, 'Obstetric'), el('span', { class: 'v' }, gpLine_(r))) : null,
@@ -715,9 +732,52 @@ function viewScreen(p) {
       el('div', { class: 'stack' },
         el('button', { class: 'btn accent block', type: 'button', id: 'v-pdf', onclick: () => sharePdf(r) }, 'PDF: print or send on WhatsApp'),
         editable ? el('button', { class: 'btn block', type: 'button', id: 'v-edit', onclick: () => go('form', { uid: r.uid }) }, final ? 'Edit (final)' : 'Edit') : null,
-        final && can('finalise') ? el('button', { class: 'btn block', type: 'button', id: 'v-reopen', onclick: () => { queueSave(r.uid, { status: 'D' }); saveState().then(() => sync()); render(); } }, 'Reopen as draft') : null,
+        final && can('finalise') ? el('button', { class: 'btn block', type: 'button', id: 'v-reopen', onclick: () => {
+          const why = el('input', { type: 'text', id: 'reopen-reason', maxlength: '120' });
+          modal('Reopen ' + (r.ds_no || '') + ' as a draft?', el('div', null, el('p', { class: 'small muted' }, 'Its QR will show "withdrawn" until it is finalised again. The reason goes in the audit trail.'), why,
+            el('div', { class: 'chips' }, ['Correcting a mistake', 'Adding information'].map((x) => el('button', { class: 'chip', type: 'button', onclick: () => { why.value = x; } }, x)))),
+          [['Cancel', null], ['Reopen', () => { if (s_(why.value).length < 3) { toast('Give the reason'); return false; } queueSave(r.uid, { status: 'D' }); const c = pendingOf(r.uid); if (c) c.reason = s_(why.value); saveState().then(() => sync()); render(); }, 'primary']]);
+        } }, 'Reopen as draft') : null,
         el('button', { class: 'btn block', type: 'button', id: 'v-again', onclick: () => newSummary(r) }, 'New admission, same patient'),
-        can('template') ? el('button', { class: 'btn block', type: 'button', id: 'v-tpl', onclick: () => saveTemplate(r) }, 'Save as a template') : null)));
+        can('template') ? el('button', { class: 'btn block', type: 'button', id: 'v-tpl', onclick: () => saveTemplate(r) }, 'Save as a template') : null,
+        canDelete_(role(), r, S.cfg.name) || !serverRow(r.uid) ? el('button', { class: 'btn danger block', type: 'button', id: 'v-delete', onclick: () => deleteRecord(r) }, 'Delete this summary') : null)));
+}
+// Delete: a summary never sent is just removed from this phone; one in the workbook is moved to its DELETED tab (online), with a reason.
+function dropLocal(uid, msg) {
+  S.outbox = S.outbox.filter((c) => c.uid !== uid);
+  if (S.server) S.server.rows = (S.server.rows || []).filter((x) => x.uid !== uid);
+  saveState().then(() => { T.form = null; tabTo('home'); toast(msg); });
+}
+function saveAsNew(r) {                                   // the edit outlived its record: keep the content as a fresh draft
+  const c = pendingOf(r.uid), vals = {};
+  EDITABLE.forEach((k) => { if (s_(r[k])) vals[k] = s_(r[k]); });
+  vals.status = 'D'; delete vals.vcode;
+  if (c) S.outbox.splice(S.outbox.indexOf(c), 1);
+  if (S.server) S.server.rows = (S.server.rows || []).filter((x) => x.uid !== r.uid);
+  const uid = rid();
+  S.outbox.push({ cid: rid(), uid, create: true, values: vals, base: {}, status: 'pending', rev: 1, by: S.cfg.name });
+  saveState().then(() => { sync(); T.nav = [{ name: 'view', p: { uid } }]; render(); toast('Saved again as a new draft'); });
+}
+function deleteRecord(r) {
+  const onServer = !!serverRow(r.uid), certs = certsOf(r.uid).filter((c) => c.status !== 'W');
+  if (onServer && certs.length) { modal('Withdraw its certificates first', el('p', null, certs.map((c) => c.cert_no).join(', ') + ' ' + (certs.length > 1 ? 'are' : 'is') + ' still in force. Withdraw ' + (certs.length > 1 ? 'them' : 'it') + ' below, then delete the summary.'), [['OK', null, 'primary']]); return; }
+  if (!onServer) {
+    modal('Remove ' + (r.name || 'this summary') + '?', el('p', null, 'It has not reached the workbook, so it is only on this phone. It will be gone for good.'), [['Cancel', null], ['Remove', () => dropLocal(r.uid, 'Removed'), 'danger']]);
+    return;
+  }
+  const why = el('input', { type: 'text', id: 'del-reason', maxlength: '120', placeholder: 'e.g. test entry' });
+  modal('Delete ' + (r.ds_no || 'this summary') + ' (' + (r.name || '') + ')?', el('div', null,
+    el('p', null, 'It disappears from every phone. The workbook keeps a copy in its DELETED tab, with your name and the reason, which only the PI can see.'),
+    el('label', { class: 'lab', for: 'del-reason' }, 'Reason'), why,
+    el('div', { class: 'chips' }, ['Test entry', 'Duplicate', 'Wrong patient'].map((x) => el('button', { class: 'chip', type: 'button', onclick: () => { why.value = x; } }, x)))),
+  [['Cancel', null], ['Delete', () => {
+    if (s_(why.value).length < 3) { toast('Give the reason'); return false; }
+    if (!navigator.onLine) { toast('Deleting needs a signal.'); return false; }
+    api({ op: 'record_delete', token: S.cfg.token, uid: r.uid, reason: s_(why.value), by: S.cfg.name }).then((x) => {
+      if (!x.ok) { toast(x.error); return; }
+      dropLocal(r.uid, (r.ds_no || 'Summary') + ' deleted');
+    }).catch((e) => toast('Not deleted: ' + e.message));
+  }, 'danger']]);
 }
 function conflictCard(c) {
   const cur0 = c.current || {};

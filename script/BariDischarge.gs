@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.6
+ *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.8
  *  4 November 2026. One file: paste into the spreadsheet's Apps Script editor.
  * ============================================================================
  *  Keeps one row per discharge in the tab DISCHARGES, with the same headings as the
@@ -16,7 +16,10 @@
  *    STAFF        consultant and medical officer names offered as buttons
  *    FOLLOW_UPS   every follow-up not yet attended or closed, soonest first (a live view: do not type in it)
  *    CERTIFICATES medical certificates (sick leave, maternity leave, fitness, attendant) issued from final summaries
- *    LOG          who changed what and when (field names only, not the text)
+ *    DELETED      summaries deleted from the phone, kept here with who deleted them, when and why (only the PI can see the sheet)
+ *    LOG          a short list of who did what and when (field names only, not the text)
+ *    AUDIT        the full audit trail: every change field by field with the old and new value, who, role, when and why,
+ *                 written only by the script, each row chained to the one before by a hash so any later edit shows (menu: PI: check the audit trail)
  *
  *  Install:
  *    1. Create a blank Google Sheet and name it Bari_Discharge.
@@ -32,7 +35,7 @@
  */
 
 const CFG = {
-  VERSION: '1.6',
+  VERSION: '1.8',
   SCHEMA_VER: 4,                      // 2: obstetric layout (G/P, weeks, co-morbid, operation date, Hb/TLC/PLT); 3: follow-up calendar and patient phone; 4: verification code
   TZ: 'Asia/Karachi',
   MENU: 'Bari Discharge',
@@ -267,6 +270,8 @@ function vcodeShow_(c) { return str_(c).toUpperCase().replace(/(.{4})(?=.)/g, '$
 function verifyUrl_(api, row, fp) { const m = /\/macros\/s\/([\w-]+)\/exec/.exec(str_(api)); return m && str_(row.vcode) ? VERIFY_PAGE + '#' + m[1] + '.' + row.vcode + '.' + fp : ''; }
 
 // ---------------------------------------------------------------- certificate wording (shared with the phone)
+// Who may delete a summary: the PI any; a consultant any draft; a medical officer only a draft they wrote.
+function canDelete_(role, row, me) { return role === 'pi' || (str_(row.status) !== 'F' && (role === 'consultant' || !str_(row.ds_no) || str_(row.created_by) === str_(me))); }
 function codeLabel2_(list, v) { const p = list.filter(function (x) { return x[0] === code_(v); })[0]; return p ? p[1] : str_(v); }
 function dmy_(iso) { return str_(iso).split('-').reverse().join('-'); }
 function certDays_(c) { const a = dayNo_(c.from_date), b = dayNo_(c.to_date); return a !== null && b !== null ? b - a + 1 : 0; }
@@ -362,7 +367,7 @@ function cellTxt_(v) {
 }
 
 // The sheet menu. The loader (Loader.gs) builds the same menu from this list, so a new item needs no change to the loader.
-const MENU_ITEMS = [['PI: set up or repair', 'setup'], ['PI: manage users', 'menuUsers'], ['PI: invite a phone', 'menuInvite'], ['PI: revoke a phone', 'menuRevoke'],
+const MENU_ITEMS = [['PI: set up or repair', 'setup'], ['PI: check the audit trail', 'menuAuditCheck'], ['PI: manage users', 'menuUsers'], ['PI: invite a phone', 'menuInvite'], ['PI: revoke a phone', 'menuRevoke'],
   ['PI: approve all draft quick buttons', 'menuApproveQuick'], ['PI: clear all records and start over', 'menuReset']];
 function onOpen() {                      // used only when this file is pasted on its own instead of the loader
   const m = SpreadsheetApp.getUi().createMenu(CFG.MENU);
@@ -370,10 +375,10 @@ function onOpen() {                      // used only when this file is pasted o
   m.addToUi();
 }
 // What the loader calls. Every entry point must be listed here.
-const RELEASE_NOTE = 'menu item to clear test records and start over; medical certificates (sick, maternity, fitness, attendant), also for walk-in patients; QR verification of final summaries; follow-up calendar (next visit, patient mobile, missed and rebook, WhatsApp reminder)';   // shown by "PI: install update"
+const RELEASE_NOTE = 'audit trail (old and new values, hash-chained); delete a summary from the phone (kept in DELETED); menu item to clear test records and start over; medical certificates (sick, maternity, fitness, attendant), also for walk-in patients; QR verification of final summaries; follow-up calendar (next visit, patient mobile, missed and rebook, WhatsApp reminder)';   // shown by "PI: install update"
 function exports_() {
   return { VERSION: CFG.VERSION, RELEASE_NOTE: RELEASE_NOTE, SCHEMA_VER: CFG.SCHEMA_VER, MENU: CFG.MENU, MENU_ITEMS: MENU_ITEMS,
-    setup: setup, menuUsers: menuUsers, menuInvite: menuInvite, menuRevoke: menuRevoke, menuApproveQuick: menuApproveQuick, menuReset: menuReset, doGet: doGet, doPost: doPost };
+    setup: setup, menuUsers: menuUsers, menuInvite: menuInvite, menuRevoke: menuRevoke, menuApproveQuick: menuApproveQuick, menuReset: menuReset, menuAuditCheck: menuAuditCheck, doGet: doGet, doPost: doPost };
 }
 
 // ---------------------------------------------------------------- setup
@@ -445,8 +450,9 @@ function buildAll_(ss) {
   backfillVcodes_(ss);
   verifyTab_(ss);
   const lg = sheet_(ss, 'LOG', ['at', 'user', 'action', 'ds_no', 'detail']);
+  const au = sheet_(ss, 'AUDIT', AUDIT_COLS, { wide: ['old_value', 'new_value'] });
   try {                                                  // only the PI may edit the system tabs by hand
-    [lg].forEach(function (sh) { const p = sh.protect().setDescription('system'); p.getEditors().forEach(function (u) { if ((u.getEmail() || '').toLowerCase() !== piEmail_()) p.removeEditor(u); }); });
+    [lg, au].forEach(function (sh) { const p = sh.protect().setDescription('system'); p.getEditors().forEach(function (u) { if ((u.getEmail() || '').toLowerCase() !== piEmail_()) p.removeEditor(u); }); });
   } catch (e) { /* protection is a convenience; the phones never depend on it */ }
   const s1 = ss.getSheetByName('Sheet1'); if (s1 && s1.getLastRow() === 0 && ss.getSheets().length > 1) ss.deleteSheet(s1);
 }
@@ -666,6 +672,49 @@ function dRows_(ss) { return readRows_(ss.getSheetByName('DISCHARGES'), DCOLS.ma
 function writeRow_(sh, cols, row, o) { sh.getRange(row, 1, 1, cols.length).setValues([cols.map(function (k) { return o[k] === undefined ? '' : o[k]; })]); }
 function logIt_(user, action, ds, detail) {
   try { ss_().getSheetByName('LOG').appendRow([nowTxt_(), user || '', action, ds || '', String(detail || '').slice(0, 500)]); } catch (e) { console.error('log: ' + e); }
+  audit_([{ user: user, action: action, record: ds, detail: detail }]);
+}
+// ---------------------------------------------------------------- audit trail
+// Who, role, what, which record, which field, old and new value, when (the workbook's clock, not the phone's) and why.
+// Each row carries a hash of its own content and the previous row's hash, so editing, inserting or deleting a row by hand breaks the
+// chain from that point; "PI: check the audit trail" finds it. Rows are only ever added.
+const AUDIT_COLS = ['seq', 'at', 'user', 'name', 'role', 'action', 'record', 'field', 'old_value', 'new_value', 'detail', 'hash'];
+const AUDIT_MAX = 45000;                                              // a cell holds 50 000 characters
+function auditHash_(prev, o) { return sha256_(prev + '\u001f' + AUDIT_COLS.slice(0, -1).map(function (k) { return String(o[k] === undefined ? '' : o[k]); }).join('\u001f')).slice(0, 24); }
+function audit_(items) {
+  try {
+    const sh = ss_().getSheetByName('AUDIT');
+    if (!sh || !items.length) return;
+    let last = sh.getLastRow(), prev = 'START', seq = 0;
+    if (last > 1) { const v = sh.getRange(last, 1, 1, AUDIT_COLS.length).getValues()[0]; seq = Number(v[0]) || 0; prev = String(v[AUDIT_COLS.length - 1]); }
+    const at = Utilities.formatDate(new Date(), CFG.TZ, 'yyyy-MM-dd HH:mm:ss');
+    const rows = items.map(function (it) {
+      const o = { seq: ++seq, at: at, user: str_(it.user).toLowerCase(), name: str_(it.name).slice(0, 60), role: it.role || (it.user ? ROLE_NAMES[roleOf_(it.user)] || '' : ''), action: str_(it.action), record: str_(it.record),
+        field: str_(it.field), old_value: String(it.old === undefined ? '' : it.old).slice(0, AUDIT_MAX), new_value: String(it.new === undefined ? '' : it.new).slice(0, AUDIT_MAX), detail: String(it.detail === undefined ? '' : it.detail).slice(0, 2000) };
+      o.hash = auditHash_(prev, o); prev = o.hash;
+      return AUDIT_COLS.map(function (k) { return o[k]; });
+    });
+    sh.getRange(last + 1, 1, rows.length, AUDIT_COLS.length).setValues(rows);
+  } catch (e) { console.error('audit: ' + e); }
+}
+function auditCheck_() {
+  const sh = ss_().getSheetByName('AUDIT');
+  if (!sh || sh.getLastRow() < 2) return { ok: true, n: 0 };
+  const v = sh.getRange(2, 1, sh.getLastRow() - 1, AUDIT_COLS.length).getValues();
+  let prev = 'START';
+  for (let i = 0; i < v.length; i++) {
+    const o = {}; AUDIT_COLS.forEach(function (k, j) { o[k] = cellTxt_(v[i][j]); });
+    if (Number(o.seq) !== i + 1 || auditHash_(prev, o) !== o.hash) return { ok: false, n: v.length, row: i + 2, seq: o.seq };
+    prev = o.hash;
+  }
+  return { ok: true, n: v.length };
+}
+function menuAuditCheck() {
+  requirePI_();
+  const r = auditCheck_(), ui = SpreadsheetApp.getUi();
+  if (r.ok) ui.alert('Audit trail intact', r.n + ' entr' + (r.n === 1 ? 'y' : 'ies') + ' checked. None has been edited, inserted or removed by hand.', ui.ButtonSet.OK);
+  else ui.alert('Audit trail altered', 'Row ' + r.row + ' of the AUDIT tab (entry ' + r.seq + ') does not match the chain: it, or a row before it, was edited, inserted or removed by hand. Entries before row ' + r.row + ' are intact.', ui.ButtonSet.OK);
+  logIt_(me_(), 'audit trail checked', '', r.ok ? 'intact, ' + r.n + ' entries' : 'altered at row ' + r.row);
 }
 function wbSchema_() { const v = Number(props_().getProperty('SCHEMA_VER')); return v > 0 ? v : 1; }
 function nextDs_(rows) {
@@ -774,7 +823,7 @@ function menuReset() {
 }
 function resetAll_(ss, fresh) {
   const clear = function (name) { const sh = ss.getSheetByName(name), n = sh ? sh.getLastRow() - 1 : 0; if (n > 0) sh.deleteRows(2, n); return Math.max(0, n); };
-  const n = clear('DISCHARGES'), c = clear('CERTIFICATES'); clear('LOG');
+  const n = clear('DISCHARGES'), c = clear('CERTIFICATES'); clear('LOG'); clear('DELETED'); clear('AUDIT');
   let b = 0;
   ss.getSheets().slice().forEach(function (sh) { if (/^DISCHARGES_backup /.test(sh.getName())) { ss.deleteSheet(sh); b++; } });
   if (fresh) {
@@ -826,6 +875,7 @@ function doPost(e) {
     if (req.op === 'template_delete') return appJson_(templateDelete_(u, req));
     if (req.op === 'cert_issue') return appJson_(certIssue_(u, req));
     if (req.op === 'cert_withdraw') return appJson_(certWithdraw_(u, req));
+    if (req.op === 'record_delete') return appJson_(recordDelete_(u, req));
     if (req.op === 'invite') return appJson_(appInvite_(u, req));
     return appJson_({ ok: false, error: 'unknown operation' });
   } catch (err) {
@@ -914,6 +964,29 @@ function certWithdraw_(u, req) {
     logIt_(u.email, 'certificate withdrawn', c.ds_no, c.cert_no + ': ' + why);
     delete c._row;
     return { ok: true, cert: c };
+  });
+}
+
+// Deleting moves the row to the DELETED tab (with who, when and why), so nothing is lost by a wrong tap; the PI can copy it back by hand.
+// A summary with certificates still in force is not deleted: withdraw them first.
+function recordDelete_(u, req) {
+  const uid = str_(req.uid), why = str_(req.reason).slice(0, 120);
+  if (!/^[0-9a-f]{24}$/.test(uid)) return { ok: false, error: 'bad request' };
+  if (why.length < 3) return { ok: false, error: 'give the reason' };
+  return withLock_(function () {
+    const ss = ss_(), sh = ss.getSheetByName('DISCHARGES'), r = dRows_(ss).filter(function (x) { return x.uid === uid; })[0];
+    if (!r) return { ok: true, gone: true };                                              // already gone: the phone just forgets it
+    const by = str_(req.by).slice(0, 60) || u.email;
+    if (u.role !== 'pi' && (r.status === 'F' || (u.role !== 'consultant' && r.created_by !== by && r.created_by !== u.email))) return { ok: false, error: r.status === 'F' ? 'only the PI can delete a final summary' : 'only its author, a consultant or the PI can delete this draft' };
+    if (certRows_().some(function (c) { return c.ds_uid === uid && c.status !== 'W'; })) return { ok: false, error: 'this summary has certificates in force; withdraw them first' };
+    const cols = DCOLS.map(function (c) { return c.key; }).concat(['deleted_by', 'deleted_at', 'deleted_why']);
+    const del = sheet_(ss, 'DELETED', cols);
+    r.deleted_by = by; r.deleted_at = nowTxt_(); r.deleted_why = why;
+    writeRow_(del, cols, del.getLastRow() + 1, r);
+    sh.deleteRow(r._row);
+    try { ss.getSheetByName('LOG').appendRow([nowTxt_(), u.email, 'deleted', r.ds_no, why]); } catch (e) { console.error('log: ' + e); }
+    audit_([{ user: u.email, name: by, role: ROLE_NAMES[u.role], action: 'deleted', record: r.ds_no, field: '(whole summary)', old: JSON.stringify(Object.keys(r).filter(function (k) { return k[0] !== '_' && str_(r[k]); }).reduce(function (o, k) { o[k] = r[k]; return o; }, {})), new: '', detail: why }]);
+    return { ok: true, ds_no: r.ds_no };
   });
 }
 
@@ -1025,7 +1098,10 @@ function appPush_(u, changes) {
         if (next.status === 'D') { next.finalised_by = ''; next.finalised_at = ''; }
         if (isNew) { const r = sh.getLastRow() + 1; writeRow_(sh, keys, r, next); next._row = r; rows.push(next); }
         else { writeRow_(sh, keys, row._row, next); next._row = row._row; rows[rows.indexOf(row)] = next; }
-        logIt_(u.email, isNew ? 'created' : next.status === 'F' && before.status !== 'F' ? 'finalised' : before && before.status === 'F' && next.status === 'D' ? 'reopened' : 'changed', next.ds_no, changed.join(', '));
+        const act = isNew ? 'created' : next.status === 'F' && before.status !== 'F' ? 'finalised' : before && before.status === 'F' && next.status === 'D' ? 'reopened' : 'changed';
+        try { ss.getSheetByName('LOG').appendRow([nowTxt_(), u.email, act, next.ds_no, changed.join(', ').slice(0, 500)]); } catch (e) { console.error('log: ' + e); }
+        audit_(changed.filter(function (k) { return ['updated_by', 'updated_at', 'created_by', 'created_at', 'finalised_by', 'finalised_at'].indexOf(k) < 0; })
+          .map(function (k) { return { user: u.email, name: by, role: ROLE_NAMES[u.role], action: act, record: next.ds_no, field: k, old: before ? str_(before[k]) : '', new: str_(next[k]), detail: str_(ch.reason) }; }));
         res.status = 'ok'; res.ds_no = next.ds_no;
       } catch (err) { res.status = 'refused'; res.errors = [String(err.message || err)]; }
       results.push(res);
