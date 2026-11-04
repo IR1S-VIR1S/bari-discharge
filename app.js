@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.4';
-const BUILD_ID = '1940fdb86583';
+const BUILD_ID = '062d036eee80';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -208,6 +208,12 @@ async function sync() {
   try {
     const hi = await api({ op: 'hello', token: S.cfg.token }); still();
     if (hi.code === 401) throw Object.assign(new Error('This phone no longer has access. Ask the PI for a new invitation.'), { code: 401 });
+    if (hi.ok && (hi.reset || '') !== (S.resetSeen || '')) {          // the PI cleared the records (a test run): drop this phone's copy and anything unsent
+      const lost = S.outbox.length;
+      S.outbox = []; if (S.server) { S.server.rows = []; S.server.certs = []; } S.resetSeen = hi.reset || ''; T.form = null;
+      await saveState(); still();
+      if (lost) toast('The PI cleared the test records: ' + lost + ' unsent change(s) on this phone were dropped.');
+    }
     if (hi.ok && Number(hi.schema) !== CFG.SCHEMA_VER) throw new Error('The app and the workbook are different versions. Close the app and open it again while online. Your entries are kept.');
     const pending = S.outbox.filter((c) => c.status === 'pending');
     for (let i = 0; i < pending.length; i += PUSH_BATCH) {
@@ -382,7 +388,7 @@ function setupScreen() {
       const res = await api({ op: 'join', code: T.join.code, device: navigator.userAgent.slice(0, 60) });
       if (!res.ok) throw new Error(res.error || 'joining failed');
       T.salt = crypto.getRandomValues(new Uint8Array(16)); KEY = await deriveKey(a, T.salt);
-      S = { cfg: { api: T.join.api, token: res.token, email: res.email, role: res.role, name: n, joined: Date.now() }, server: null, outbox: [], lastSync: 0, usage: {} };
+      S = { cfg: { api: T.join.api, token: res.token, email: res.email, role: res.role, name: n, joined: Date.now() }, server: null, outbox: [], lastSync: 0, usage: {}, resetSeen: res.reset || '' };
       await saveState(); sessSave(); T.hasVault = true; T.join = null;
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
       bumpIdle(); render(); sync();

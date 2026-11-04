@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.5
+ *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.6
  *  4 November 2026. One file: paste into the spreadsheet's Apps Script editor.
  * ============================================================================
  *  Keeps one row per discharge in the tab DISCHARGES, with the same headings as the
@@ -32,7 +32,7 @@
  */
 
 const CFG = {
-  VERSION: '1.5',
+  VERSION: '1.6',
   SCHEMA_VER: 4,                      // 2: obstetric layout (G/P, weeks, co-morbid, operation date, Hb/TLC/PLT); 3: follow-up calendar and patient phone; 4: verification code
   TZ: 'Asia/Karachi',
   MENU: 'Bari Discharge',
@@ -363,17 +363,17 @@ function cellTxt_(v) {
 
 // The sheet menu. The loader (Loader.gs) builds the same menu from this list, so a new item needs no change to the loader.
 const MENU_ITEMS = [['PI: set up or repair', 'setup'], ['PI: manage users', 'menuUsers'], ['PI: invite a phone', 'menuInvite'], ['PI: revoke a phone', 'menuRevoke'],
-  ['PI: approve all draft quick buttons', 'menuApproveQuick']];
+  ['PI: approve all draft quick buttons', 'menuApproveQuick'], ['PI: clear all records and start over', 'menuReset']];
 function onOpen() {                      // used only when this file is pasted on its own instead of the loader
   const m = SpreadsheetApp.getUi().createMenu(CFG.MENU);
   MENU_ITEMS.forEach(function (it) { m.addItem(it[0], it[1]); });
   m.addToUi();
 }
 // What the loader calls. Every entry point must be listed here.
-const RELEASE_NOTE = 'medical certificates (sick, maternity, fitness, attendant), also for walk-in patients; QR verification of final summaries; follow-up calendar (next visit, patient mobile, missed and rebook, WhatsApp reminder)';   // shown by "PI: install update"
+const RELEASE_NOTE = 'menu item to clear test records and start over; medical certificates (sick, maternity, fitness, attendant), also for walk-in patients; QR verification of final summaries; follow-up calendar (next visit, patient mobile, missed and rebook, WhatsApp reminder)';   // shown by "PI: install update"
 function exports_() {
   return { VERSION: CFG.VERSION, RELEASE_NOTE: RELEASE_NOTE, SCHEMA_VER: CFG.SCHEMA_VER, MENU: CFG.MENU, MENU_ITEMS: MENU_ITEMS,
-    setup: setup, menuUsers: menuUsers, menuInvite: menuInvite, menuRevoke: menuRevoke, menuApproveQuick: menuApproveQuick, doGet: doGet, doPost: doPost };
+    setup: setup, menuUsers: menuUsers, menuInvite: menuInvite, menuRevoke: menuRevoke, menuApproveQuick: menuApproveQuick, menuReset: menuReset, doGet: doGet, doPost: doPost };
 }
 
 // ---------------------------------------------------------------- setup
@@ -753,6 +753,37 @@ function menuApproveQuick() {
   logIt_(me_(), 'quick buttons approved', '', String(n));
   SpreadsheetApp.getUi().alert('Approved', n + ' draft quick button(s) are now live on every phone (after their next sync).', SpreadsheetApp.getUi().ButtonSet.OK);
 }
+// Clears every summary, certificate and log line after a test run, so numbering starts again at BH-0001 and MC-0001.
+// A full copy of the whole spreadsheet is saved in Drive first. Users, invited phones, STAFF and (unless the PI asks) buttons and templates stay.
+// Phones learn of the reset at their next sync and drop anything not yet sent, so test entries cannot come back.
+function menuReset() {
+  requirePI_();
+  const ui = SpreadsheetApp.getUi(), ss = SpreadsheetApp.getActive();
+  const n = Math.max(0, ss.getSheetByName('DISCHARGES').getLastRow() - 1), c = ss.getSheetByName('CERTIFICATES') ? Math.max(0, ss.getSheetByName('CERTIFICATES').getLastRow() - 1) : 0;
+  const a = ui.prompt('Clear all records and start over?', 'This deletes ' + n + ' discharge summar' + (n === 1 ? 'y' : 'ies') + ', ' + c + ' certificate' + (c === 1 ? '' : 's') + ', the LOG and old backup tabs. Numbering starts again at ' + CFG.DS_PREFIX + '0001 and MC-0001.\n\n' +
+    'A full copy of this spreadsheet is saved in your Google Drive first. Users, invited phones and STAFF are kept. Phones drop anything they have not sent.\n\nType START OVER to continue:', ui.ButtonSet.OK_CANCEL);
+  if (a.getSelectedButton() !== ui.Button.OK || a.getResponseText().trim().toUpperCase() !== 'START OVER') { ui.alert('Nothing was changed', 'The records are as they were.', ui.ButtonSet.OK); return; }
+  const fresh = ui.alert('Buttons and templates', 'Also put the quick buttons and templates back to the starter set?\n\nOK: yes, starter set (buttons people added and templates saved during the test go).\nCancel: keep them as they are.', ui.ButtonSet.OK_CANCEL) === ui.Button.OK;
+  const stamp = Utilities.formatDate(new Date(), CFG.TZ, 'yyyy-MM-dd HHmm');
+  let copy;
+  try { copy = ss.copy(ss.getName() + ' (backup before reset ' + stamp + ')'); } catch (e) { ui.alert('Nothing was changed', 'The backup copy could not be made (' + e.message + '), so nothing was deleted.', ui.ButtonSet.OK); return; }
+  const r = withLock_(function () { return resetAll_(ss, fresh); });
+  props_().setProperty('RESET_AT', stamp + ' ' + randomHex_(6));
+  logIt_(me_(), 'records cleared', '', r + '; backup copy: ' + copy.getName());
+  ui.alert('Started over', r + '.\n\nThe backup copy is in your Google Drive as "' + copy.getName() + '". Phones clear their test entries at their next sync.', ui.ButtonSet.OK);
+}
+function resetAll_(ss, fresh) {
+  const clear = function (name) { const sh = ss.getSheetByName(name), n = sh ? sh.getLastRow() - 1 : 0; if (n > 0) sh.deleteRows(2, n); return Math.max(0, n); };
+  const n = clear('DISCHARGES'), c = clear('CERTIFICATES'); clear('LOG');
+  let b = 0;
+  ss.getSheets().slice().forEach(function (sh) { if (/^DISCHARGES_backup /.test(sh.getName())) { ss.deleteSheet(sh); b++; } });
+  if (fresh) {
+    clear('QUICK'); clear('TEMPLATES');
+    props_().deleteProperty('SEED_VER'); props_().deleteProperty('TPL_SEED_VER');
+    buildAll_(ss);
+  }
+  return n + ' summar' + (n === 1 ? 'y' : 'ies') + ' and ' + c + ' certificate' + (c === 1 ? '' : 's') + ' deleted' + (b ? ', ' + b + ' old backup tab' + (b === 1 ? '' : 's') + ' removed' : '') + (fresh ? ', buttons and templates back to the starter set' : '');
+}
 function approveQuick_() {
   const sh = ss_().getSheetByName('QUICK'), rows = readRows_(sh, QUICK_COLS);
   let n = 0;
@@ -780,7 +811,7 @@ function doPost(e) {
     if (req.op === 'verify') return appJson_(appVerify_(req));
     const u = appUser_(req.token);
     if (!u) return appJson_({ ok: false, error: 'not authorised', code: 401 });
-    if (req.op === 'hello') return appJson_({ ok: true, schema: wbSchema_(), version: CFG.VERSION });
+    if (req.op === 'hello') return appJson_({ ok: true, schema: wbSchema_(), version: CFG.VERSION, reset: props_().getProperty('RESET_AT') || '' });
     if (wbSchema_() !== CFG.SCHEMA_VER) return appJson_({ ok: false, error: 'The workbook is being upgraded. Your entries stay on this phone.', code: 409 });
     if (req.op === 'pull') return appJson_(appPull_(u));
     if (req.op === 'push') {
@@ -899,7 +930,7 @@ function appJoin_(req) {
   const token = randomHex_(64);
   P.setProperty('APP_' + sha256_(token), JSON.stringify({ email: inv.email, issued: Date.now(), device: str_(req.device).slice(0, 60) }));
   logIt_(inv.email, 'phone joined', '', str_(req.device).slice(0, 60));
-  return { ok: true, token: token, email: inv.email, role: role };
+  return { ok: true, token: token, email: inv.email, role: role, reset: P.getProperty('RESET_AT') || '' };
 }
 function appInvite_(u, req) {
   if (u.role !== 'pi') return { ok: false, error: 'only the PI can invite' };
