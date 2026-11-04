@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.7';
-const BUILD_ID = 'c0ab46641973';
+const BUILD_ID = 'ca76e0fb2ba6';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -288,8 +288,25 @@ function render() {
     page = c.name === 'form' ? formScreen(c.p) : c.name === 'view' ? viewScreen(c.p) : c.name === 'list' ? listScreen() : c.name === 'settings' ? settingsScreen()
       : c.name === 'buttons' ? buttonsScreen() : c.name === 'fu' ? fuScreen() : c.name === 'cert' ? certScreen(c.p) : c.name === 'certs' ? certsScreen() : homeScreen();
   }
+  const f = KEY && S ? fabFor() : null;
+  if (f) { page.classList.add('has-fab'); page.append(f); }
   app.replaceChildren(page);
 }
+// The main action of a screen sits at the bottom, in the thumb's reach, as an extended floating button (icon and label).
+// It shrinks to its icon while the page scrolls down and grows again at the top. Left-handed users can put it on the left (Settings).
+function fabFor() {
+  const c = cur();
+  if (c.name === 'home') return fab('new-summary', 'newdoc', 'New summary', () => newSummary());
+  if (c.name === 'certs' && can('certify')) return fab('cert-walkin', 'certplus', 'Walk-in certificate', () => go('cert', { walk: true }));
+  if (c.name === 'view' && can('certify')) { const r = record(c.p.uid); if (r && r.status === 'F') return fab('cert-new', 'certplus', 'Certificate', () => go('cert', { uid: r.uid })); }
+  return null;
+}
+function fab(id, ic, label, fn) {
+  const b = el('button', { class: 'fab' + (S.cfg.fabLeft ? ' left' : '') + (window.scrollY > 40 ? ' mini' : ''), type: 'button', id, 'aria-label': label, onclick: fn }, icon(ic), el('span', { class: 'fl' }, label));
+  if (!cur().name || cur().name === 'home' || cur().name === 'certs') b.classList.add('above-bar');
+  return b;
+}
+window.addEventListener('scroll', () => { const f = document.querySelector('.fab'); if (f) f.classList.toggle('mini', window.scrollY > 40); }, { passive: true });
 function topBar(title, opts) {
   opts = opts || {};
   if (!opts.back && T.nav.length && navNested().indexOf(cur().name) >= 0) opts.back = true;     // a tab moved under Settings opens with a way back
@@ -315,6 +332,8 @@ const ICONS = {
   calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 10h17M8 3v4M16 3v4M8 14h2M14 14h2M8 17.5h2"/>',
   phone: '<path d="M6.5 3.5h3l1.5 4-2 1.5a11 11 0 0 0 6 6l1.5-2 4 1.5v3a2 2 0 0 1-2 2A16.5 16.5 0 0 1 4.5 5.5a2 2 0 0 1 2-2z"/>',
   chat: '<path d="M4 19.5 5.3 16A8 8 0 1 1 8 18.7z"/><path d="M9 10.5h6M9 13.5h4"/>',
+  newdoc: '<path d="M6 3.5h8l4 4v13H6z"/><path d="M14 3.5v4h4M12 11v6M9 14h6"/>',
+  certplus: '<path d="M5 3.5h10l4 4v13H5z"/><path d="M8 9h5M8 12h4"/><circle cx="14.5" cy="15.5" r="2.3"/><path d="m13.3 17.5-.8 3.2 2-1 2 1-.8-3.2"/>',
   cert: '<path d="M5 3.5h10l4 4v13H5z"/><path d="M8 9h6M8 12h8"/><circle cx="14.5" cy="16" r="2.3"/><path d="m13.3 18-.8 3.2 2-1 2 1-.8-3.2"/>'
 };
 const ICON_DETAIL = { records: [1], buttons: [3], calendar: [1], cert: [1, 2] };      // inner strokes that stay visible when the selected icon is filled
@@ -508,12 +527,11 @@ function homeScreen() {
   const finals = all.filter((r) => r.status === 'F' && !r._pending).slice(0, 8), bad = attention();
   return el('div', { class: 'page' }, topBar('Bari Discharge'),
     el('main', null,
-      el('button', { class: 'btn big primary block', type: 'button', id: 'new-summary', onclick: () => newSummary() }, '+ New discharge summary'),
       fuHomeCard(),
       searchBox(),
       el('div', { id: 'results' }),
       bad.length ? el('section', { class: 'feed alert' }, el('h2', null, 'Needs attention (' + bad.length + ')'), bad.map(card)) : null,
-      el('section', { class: 'feed' }, el('h2', null, 'Drafts (' + drafts.length + ')'), drafts.length ? drafts.map(card) : el('p', { class: 'muted small' }, 'No drafts. Tap New discharge summary to start one.')),
+      el('section', { class: 'feed' }, el('h2', null, 'Drafts (' + drafts.length + ')'), drafts.length ? drafts.map(card) : el('p', { class: 'muted small' }, 'No drafts. Tap New summary at the bottom to start one.')),
       el('section', { class: 'feed' }, el('h2', null, 'Recently finalised'), finals.length ? finals.map(card) : el('p', { class: 'muted small' }, 'None yet.'))),
     bottomNav('home'));
 }
@@ -1050,8 +1068,7 @@ function certLine(c, who) {
 function certCard(r) {
   const list = certsOf(r.uid);
   return el('section', { class: 'card', id: 'cert-card' }, el('h2', null, 'Medical certificates (' + list.length + ')'),
-    list.length ? list.map(certLine) : el('p', { class: 'muted small' }, 'None issued. Sick leave, maternity leave, fitness to resume and attendant certificates are issued from here.'),
-    can('certify') ? el('button', { class: 'btn block', type: 'button', id: 'cert-new', onclick: () => go('cert', { uid: r.uid }) }, '+ Issue a certificate') : null);
+    list.length ? list.map(certLine) : el('p', { class: 'muted small' }, 'None issued. Sick leave, maternity leave, fitness to resume and attendant certificates are issued with the Certificate button at the bottom.'),);
 }
 const certDoc = (c) => ({ _cert: c, status: c.status === 'W' ? 'W' : 'F', ds_no: c.cert_no, name: c.patient, consultant: c.doctor, vcode: c.vcode });
 async function shareCert(c) {
@@ -1156,7 +1173,7 @@ function certScreen(p) {
           shareCert(x.cert);
         }).catch((e) => { toast('Not issued: ' + e.message); render(); });
       }, 'primary']]);
-    } }, 'Issue certificate')));
+    } }, icon('certplus'), ' Issue certificate')));
 }
 // The Certificates tab: every certificate on this phone, newest first, and the walk-in button.
 function certsScreen() {
@@ -1170,8 +1187,7 @@ function certsScreen() {
       h.length ? h.map((c) => certLine(c, true)) : el('p', { class: 'muted small' }, all.length ? 'None match.' : 'No certificates yet.'));
   }
   return el('div', { class: 'page' }, topBar('Certificates'), el('main', null,
-    can('certify') ? el('button', { class: 'btn big primary block', type: 'button', id: 'cert-walkin', onclick: () => go('cert', { walk: true }) }, '+ Walk-in certificate') : null,
-    el('p', { class: 'small muted' }, can('certify') ? 'For a patient seen in the OPD. For an admitted patient, open her final summary and issue it there: the dates come from her admission.' : 'Only a consultant can issue certificates. You can print and send any of these.'),
+    el('p', { class: 'small muted' }, can('certify') ? 'Walk-in, at the bottom, is for a patient seen in the OPD. For an admitted patient, open her final summary and use its Certificate button: the dates come from her admission.' : 'Only a consultant can issue certificates. You can print and send any of these.'),
     box, certList()), bottomNav('certs'));
 }
 
@@ -1196,6 +1212,7 @@ function settingsScreen() {
       return el('section', { class: 'card', id: 'set-bar' }, el('h2', null, 'Bottom bar'),
         nested.length ? el('div', { class: 'tiles nested' }, nested.map((id) => { const t = navAll().filter((x) => x[0] === id)[0], b = navBadge(id);
           return el('button', { class: 'tile', type: 'button', id: 'set-' + id, onclick: () => go(id) }, el('b', { class: 'tt' }, icon(t[2]), t[1], b ? el('i', { class: 'badge inline' + (b[1] ? ' ' + b[1] : '') }, String(b[0])) : null), el('span', null, 'moved here from the bar')); })) : null,
+        el('div', { class: 'kv barrow' }, el('span', { class: 'k' }, 'Main button'), el('span', { class: 'v' }, chipRow('fab-side', [['R', 'Right hand'], ['L', 'Left hand']], S.cfg.fabLeft ? 'L' : 'R', (x) => { if (!x) { render(); return; } S.cfg.fabLeft = x === 'L'; saveState(); render(); }))),
         el('p', { class: 'small muted' }, 'Press and hold a button in the bar, then drag it onto Settings to keep it here instead. Home and Settings always stay in the bar.'),
         all.map((t) => el('div', { class: 'kv barrow' }, el('span', { class: 'k' }, t[1]), el('span', { class: 'v' }, chipRow('bar-' + t[0], [['bar', 'In the bar'], ['set', 'In Settings']], nested.indexOf(t[0]) >= 0 ? 'set' : 'bar',
           (x) => { if (!x) { render(); return; } const now = navNested().filter((y) => y !== t[0]); if (x === 'set') now.push(t[0]); setNested(now, x === 'set' ? t[1] + ' moved to Settings' : t[1] + ' is back in the bar'); })))));

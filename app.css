@@ -172,3 +172,16 @@ body.dragging .bn#nav-settings { background: var(--chip); }
 .badge.inline.amber { background: #8a5a00; } .badge.inline.blue { background: #1e63a3; }
 .tiles.nested { margin: 0 0 8px; }
 .barrow { align-items: center; } .barrow .chips { margin-top: 0; }
+/* Main action in the thumb zone: extended floating button, bottom right (left for left-handed), above the bar */
+.fab { position: fixed; right: 16px; bottom: calc(env(safe-area-inset-bottom) + 18px); z-index: 7; display: inline-flex; align-items: center; gap: 10px; height: 56px; padding: 0 20px 0 16px; border: 0; border-radius: 18px;
+  background: var(--green); color: var(--green-ink); font-size: 16px; font-weight: 700; box-shadow: 0 6px 18px rgba(20, 40, 30, .28), 0 2px 4px rgba(20, 40, 30, .18); transition: padding .2s, gap .2s; }
+.fab.above-bar { bottom: calc(env(safe-area-inset-bottom) + 74px); }
+.fab.left { right: auto; left: 16px; }
+.fab .ico, .fab .ico svg { width: 26px; height: 26px; display: block; flex: none; }
+.fab .fl { white-space: nowrap; overflow: hidden; max-width: 220px; transition: max-width .2s, opacity .2s; }
+.fab.mini { padding: 0 15px; gap: 0; } .fab.mini .fl { max-width: 0; opacity: 0; }
+.fab:active { transform: scale(.97); }
+@media (prefers-reduced-motion: reduce) { .fab, .fab .fl { transition: none; } }
+.page.has-fab { padding-bottom: 160px; }
+.toast { bottom: 150px; }
+.actbar .btn .ico, .actbar .btn .ico svg { width: 20px; height: 20px; display: inline-block; vertical-align: -4px; }
