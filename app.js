@@ -3,8 +3,8 @@
  * workbook (BariDischarge.gs web app) whenever the phone is online. Fields, codes and checks come from
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
-const APP_VERSION = '1.3';
-const BUILD_ID = '19a8b966bd02';
+const APP_VERSION = '1.4';
+const BUILD_ID = '65a6952e1826';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -225,7 +225,7 @@ async function sync() {
     }
     const pull = await api({ op: 'pull', token: S.cfg.token }); still();
     if (!pull.ok) throw Object.assign(new Error(pull.error || 'the workbook refused'), { code: pull.code });
-    S.server = { rows: pull.rows, quick: pull.quick, templates: pull.templates, staff: pull.staff, roleName: pull.roleName, today: pull.today, at: Date.now() };
+    S.server = { rows: pull.rows, quick: pull.quick, templates: pull.templates, staff: pull.staff, certs: pull.certs || [], roleName: pull.roleName, today: pull.today, at: Date.now() };
     S.cfg.role = pull.role; S.lastSync = Date.now(); T.syncError = '';
     await saveState();
   } catch (e) {
@@ -278,7 +278,7 @@ function render() {
   else {
     const c = cur();
     page = c.name === 'form' ? formScreen(c.p) : c.name === 'view' ? viewScreen(c.p) : c.name === 'list' ? listScreen() : c.name === 'settings' ? settingsScreen()
-      : c.name === 'buttons' ? buttonsScreen() : c.name === 'fu' ? fuScreen() : homeScreen();
+      : c.name === 'buttons' ? buttonsScreen() : c.name === 'fu' ? fuScreen() : c.name === 'cert' ? certScreen(c.p) : homeScreen();
   }
   app.replaceChildren(page);
 }
@@ -704,6 +704,7 @@ function viewScreen(p) {
         final && s_(r.vcode) ? el('div', { class: 'small muted', id: 'v-code' }, 'Verification code ' + vcodeShow_(r.vcode) + ': printed with a QR that anyone can scan to check this summary') : null),
       SECTIONS.map((k) => (s_(r[k]) ? el('div', { class: 'card' }, el('h2', null, colDef(k).label), el('div', { class: 'pre' }, r[k])) : null)),
       fuViewCard(r),
+      final ? certCard(r) : null,
       el('div', { class: 'stack' },
         el('button', { class: 'btn accent block', type: 'button', id: 'v-pdf', onclick: () => sharePdf(r) }, 'PDF: print or send on WhatsApp'),
         editable ? el('button', { class: 'btn block', type: 'button', id: 'v-edit', onclick: () => go('form', { uid: r.uid }) }, final ? 'Edit (final)' : 'Edit') : null,
@@ -919,6 +920,105 @@ function fuSheet(uid) {
   m.hidden = false; main();
 }
 
+// ------------------------------------------------------------------ medical certificates (sick leave, maternity leave, fitness, attendant)
+// Issued by a consultant from a final summary, online, once. The workbook copies the patient's details from the summary, numbers the
+// certificate and gives it a verification code; a wrong certificate is withdrawn (with a reason) and a new one issued, never edited.
+function certsOf(uid) { return ((S.server && S.server.certs) || []).filter((c) => c.ds_uid === uid).sort((a, b) => (b.cert_no || '').localeCompare(a.cert_no || '')); }
+function certLine(c) {
+  const t = codeLabel2_(CTYPES, c.ctype), per = c.ctype === 'F' ? 'from ' + dmy(c.from_date) : dmy(c.from_date) + ' to ' + dmy(c.to_date) + ' (' + certDays_(c) + ' days)';
+  return el('div', { class: 'certrow' + (c.status === 'W' ? ' gone' : ''), 'data-cert': c.cert_no },
+    el('div', { class: 'main' }, el('b', null, c.cert_no + '  ' + t), el('div', { class: 'small muted' }, per + (c.ctype === 'A' ? ' | ' + c.attendant : '') + (c.status === 'W' ? ' | withdrawn: ' + c.withdraw_reason : ''))),
+    el('button', { class: 'chip', type: 'button', onclick: () => shareCert(c) }, 'PDF'),
+    c.status !== 'W' && can('certify') ? el('button', { class: 'chip', type: 'button', onclick: () => withdrawCert(c) }, 'Withdraw') : null);
+}
+function certCard(r) {
+  const list = certsOf(r.uid);
+  return el('section', { class: 'card', id: 'cert-card' }, el('h2', null, 'Medical certificates (' + list.length + ')'),
+    list.length ? list.map(certLine) : el('p', { class: 'muted small' }, 'None issued. Sick leave, maternity leave, fitness to resume and attendant certificates are issued from here.'),
+    can('certify') ? el('button', { class: 'btn block', type: 'button', id: 'cert-new', onclick: () => go('cert', { uid: r.uid }) }, '+ Issue a certificate') : null);
+}
+const certDoc = (c) => ({ _cert: c, status: c.status === 'W' ? 'W' : 'F', ds_no: c.cert_no, name: c.patient, consultant: c.doctor, vcode: c.vcode });
+async function shareCert(c) {
+  try {
+    const r = certDoc(c), bytes = buildPdf(r, await pdfImages(r));
+    const name = (c.cert_no + ' ' + c.patient + ' ' + codeLabel2_(CTYPES, c.ctype)).replace(/[^\w .-]+/g, '').trim() + '.pdf';
+    const file = new File([bytes], name, { type: 'application/pdf' });
+    T.lastPdf = bytes;
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); return; }
+    const url = URL.createObjectURL(file), a = el('a', { href: url, download: name });
+    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) { if (e && e.name !== 'AbortError') toast('Could not make the PDF: ' + e.message); }
+}
+function withdrawCert(c) {
+  const why = el('input', { type: 'text', id: 'cw-reason', maxlength: '120', placeholder: 'e.g. wrong dates' });
+  modal('Withdraw ' + c.cert_no + '?', el('div', null, el('p', null, 'Anyone who scans its QR will see it is withdrawn. This cannot be undone; issue a new certificate if needed.'), el('label', { class: 'lab', for: 'cw-reason' }, 'Reason'), why,
+    el('div', { class: 'chips' }, ['Wrong dates', 'Wrong kind of certificate', 'Issued in error'].map((x) => el('button', { class: 'chip', type: 'button', onclick: () => { why.value = x; } }, x)))),
+  [['Cancel', null], ['Withdraw', () => {
+    if (s_(why.value).length < 3) { toast('Give the reason'); return false; }
+    if (!navigator.onLine) { toast('Withdrawing needs a signal.'); return false; }
+    api({ op: 'cert_withdraw', token: S.cfg.token, cert_no: c.cert_no, reason: s_(why.value), by: S.cfg.name }).then(async (x) => {
+      if (!x.ok) { toast(x.error); return; }
+      if (x.cert) S.server.certs = S.server.certs.map((y) => (y.cert_no === c.cert_no ? x.cert : y));
+      await saveState(); render(); toast(c.cert_no + ' withdrawn');
+    }).catch((e) => toast('Not withdrawn: ' + e.message));
+  }, 'danger']]);
+}
+function certScreen(p) {
+  const r = record(p.uid);
+  if (!r || r.status !== 'F') return el('div', { class: 'page' }, topBar('Certificate', { back: true }), el('main', null, el('p', null, 'Certificates are issued from final summaries.')));
+  if (!T.cert || T.cert.uid !== p.uid) T.cert = { uid: p.uid, cuid: rid(), v: { ctype: 'R', purpose: 'W', from_date: s_(r.admit_date), to_date: '', exam_date: s_(r.discharge_date), show_dx: 'N', dx: s_(r.final_diagnoses).split('\n')[0], advice: '', attendant: s_(r.father_husband), relation: 'Husband', addressed_to: '' } };
+  const v = T.cert.v, today = dayIso(0), adm = s_(r.admit_date), dis = s_(r.discharge_date), birth = /deliver|caesarean|birth/i.test(s_(r.final_diagnoses) + ' ' + s_(r.course)) ? s_(r.op_date) : '';
+  const again = () => { const yy = window.scrollY; render(); window.scrollTo(0, yy); };
+  const preview = el('div', { class: 'certprev', id: 'cert-prev' }), msg = el('div', { class: 'msg', id: 'cert-msg' });
+  const draft = () => Object.assign({ cert_no: 'MC-new', patient: r.name, title: code_(r.marital) === 'S' ? 'Ms' : 'Mrs', guardian: r.father_husband, age: r.age, admit_date: adm, discharge_date: dis, birth_date: birth, issued_on: today, doctor: r.consultant }, v,
+    v.ctype === 'F' ? { to_date: v.from_date } : {}, v.ctype === 'A' ? { show_dx: 'N', advice: '' } : {});
+  function paintCert() { const c = draft(), bad = certProblems_(c); preview.replaceChildren(...certText_(c).map((t) => el('p', null, t))); msg.textContent = bad ? 'To issue: ' + bad : ''; }
+  const set = (k, x, redraw) => { v[k] = x; if (redraw) again(); else paintCert(); };
+  paintCert();
+  const date = (k, label, chips) => {
+    const i = el('input', { type: 'date', id: 'c-' + k, value: v[k] || '' });
+    i.addEventListener('input', () => set(k, i.value));
+    return el('div', { class: 'field' }, el('label', { class: 'lab', for: 'c-' + k }, label), i, el('div', { class: 'chips' }, chips.filter((c) => c[1]).map((c) => el('button', { class: 'chip', type: 'button', onclick: () => { i.value = c[1]; set(k, c[1]); } }, c[0]))));
+  };
+  const span = (days) => el('div', { class: 'chips', id: 'c-span' }, days.map((n) => el('button', { class: 'chip', type: 'button', onclick: () => { if (dayNo_(v.from_date) === null) { toast('Choose the first day'); return; } set('to_date', addDays_(v.from_date, n - 1), true); } }, n + ' days')));
+  const input = (k, id, o) => { const i = el(o.area ? 'textarea' : 'input', Object.assign({ id, value: v[k] || '' }, o.area ? { rows: '2' } : { type: 'text', maxlength: o.max || '120' }, o.ph ? { placeholder: o.ph } : {}, o.cap ? { autocapitalize: o.cap } : {})); i.addEventListener('input', () => set(k, i.value)); return i; };
+  const t = v.ctype, M0 = [['Date of admission', adm], ['Date of operation', s_(r.op_date)], ['Date of discharge', dis], ['Today', today]];
+  const para = +s_(r.para) || 0;
+  return el('div', { class: 'page form' }, topBar('Issue a certificate', { back: true }), el('main', null,
+    el('div', { class: 'card' }, el('div', { class: 'small muted' }, r.ds_no + ' | ' + r.name + ' | admitted ' + dmy(adm) + ', discharged ' + dmy(dis)),
+      el('div', { class: 'lab' }, 'Kind of certificate'), chipRow('ctype', CTYPES, t, (x) => set('ctype', x || 'R', true)),
+      el('div', { class: 'lab' }, 'For'), chipRow('purpose', PURPOSES, v.purpose, (x) => set('purpose', x || 'W')),
+      el('label', { class: 'lab', for: 'c-to' }, 'Addressed to (optional)'), input('addressed_to', 'c-to', { ph: 'e.g. The Principal, ABC School. Blank: To whom it may concern' })),
+    t === 'A' ? el('div', { class: 'card' }, el('label', { class: 'lab', for: 'c-att' }, 'Attendant’s name'), input('attendant', 'c-att', { max: '60', cap: 'words' }),
+      el('div', { class: 'lab' }, 'Relation to the patient'), chipRow('rel', RELATIONS.map((x) => [x, x]), v.relation, (x) => set('relation', x))) : null,
+    el('div', { class: 'card' },
+      t === 'F' ? date('from_date', 'Fit to resume from', [['Day after discharge', addDays_(dis, 1)], ['Today', today], ['In 2 weeks', addDays_(today, 14)], ['6 weeks after the birth', birth ? addDays_(birth, 42) : '']])
+        : [date('from_date', 'First day', t === 'A' ? M0.slice(0, 1) : M0), date('to_date', 'Last day', t === 'A' ? [['Date of discharge', dis]] : []),
+          t === 'R' ? span([3, 7, 10, 14, 21, 42]) : t === 'M' ? el('div', null, span([84, 90, 120, 180]), el('div', { class: 'hint' }, 'The federal Maternity and Paternity Leave Act 2023 gives 180, 120 or 90 days for a first, second or third birth (here Para ' + (para || '?') + '); most provincial employers give 12 weeks (84 days). Check what her employer follows.')) : null],
+      t !== 'A' ? date('exam_date', 'Date she was examined', [['Date of discharge', dis], ['Today', today]]) : null),
+    t !== 'A' ? el('div', { class: 'card' }, el('div', { class: 'lab' }, 'Diagnosis'),
+      el('button', { class: 'chip box' + (v.show_dx === 'Y' ? ' on' : ''), type: 'button', id: 'c-dx-ok', role: 'checkbox', 'aria-checked': v.show_dx === 'Y' ? 'true' : 'false', onclick: () => set('show_dx', v.show_dx === 'Y' ? 'N' : 'Y', true) }, (v.show_dx === 'Y' ? '☑' : '☐') + ' She agrees to show the diagnosis'),
+      el('div', { class: 'hint' }, 'Without her agreement the certificate says "a medical condition". Employers and schools do not need the diagnosis.'),
+      v.show_dx === 'Y' ? input('dx', 'c-dx', { max: '200' }) : null) : null,
+    t !== 'A' ? el('div', { class: 'card' }, el('label', { class: 'lab', for: 'c-adv' }, 'Advice for the employer or school (optional)'), input('advice', 'c-adv', { area: true }),
+      el('div', { class: 'chips' }, CERT_ADVICE.map((x) => el('button', { class: 'chip q', type: 'button', onclick: () => set('advice', (s_(v.advice) ? s_(v.advice) + '\n' : '') + x, true) }, x)))) : null,
+    el('section', { class: 'card' }, el('h2', null, 'It will read'), preview, msg)),
+    el('div', { class: 'actbar' }, el('button', { class: 'btn primary', type: 'button', id: 'cert-issue', onclick: () => {
+      const c = draft(), bad = certProblems_(c);
+      if (bad) { toast(bad); return; }
+      if (!navigator.onLine) { toast('Issuing a certificate needs a signal: the workbook numbers it.'); return; }
+      modal('Issue this certificate?', el('p', null, 'It is numbered and signed in the consultant’s name, and cannot be edited afterwards. A mistake is withdrawn and a new certificate issued.'), [['Cancel', null], ['Issue', () => {
+        const btn = $('#cert-issue'); if (btn) { btn.disabled = true; btn.textContent = 'Issuing…'; }
+        api({ op: 'cert_issue', token: S.cfg.token, cuid: T.cert.cuid, values: Object.assign({ ds_uid: r.uid }, v), by: S.cfg.name }).then(async (x) => {
+          if (!x.ok) { toast(x.error); render(); return; }
+          S.server.certs = (S.server.certs || []).filter((y) => y.cert_no !== x.cert.cert_no).concat([x.cert]);
+          await saveState(); T.cert = null; T.nav.pop(); render(); toast(x.cert.cert_no + ' issued');
+          shareCert(x.cert);
+        }).catch((e) => { toast('Not issued: ' + e.message); render(); });
+      }, 'primary']]);
+    } }, 'Issue certificate')));
+}
+
 // ------------------------------------------------------------------ settings and the PI's buttons screen
 function settingsScreen() {
   const tile = (id, t, sub, fn, ic) => el('button', { class: 'tile', type: 'button', id, onclick: fn }, el('b', { class: 'tt' }, ic ? icon(ic) : null, t), el('span', null, sub));
@@ -1023,7 +1123,7 @@ async function asset(name) { if (!ASSETS[name]) { try { ASSETS[name] = new Uint8
 async function logoBytes() { return asset('logo.jpg'); }
 async function pdfImages(r) { return { logo: await asset('logo.jpg'), qr: await asset('qr.jpg'), urdu: r ? await urduImages(r) : [], fp: r ? await fingerprint(r) : '' }; }
 // The fingerprint of what is printed, the same one the workbook works out when the QR is scanned
-async function fingerprint(r) { const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(printedText_(r)))); return Array.from(h.slice(0, 4), (b) => b.toString(16).padStart(2, '0')).join('').toUpperCase(); }
+async function fingerprint(r) { const h = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(r._cert ? certPrinted_(r._cert) : printedText_(r)))); return Array.from(h.slice(0, 4), (b) => b.toString(16).padStart(2, '0')).join('').toUpperCase(); }
 // QR as vector squares (crisp at any print size). Runs of dark modules on a row are drawn as one rectangle.
 function qrOps(text, x, yTop, size) {
   const q = qrcode(0, 'M'); q.addData(text); q.make();
@@ -1090,7 +1190,7 @@ function buildPdf(r, imgs) {
   const bar = (x1, x2, yy, wd, rgb) => ops.push('q ' + rgb + ' RG ' + wd + ' w ' + x1.toFixed(2) + ' ' + yy.toFixed(2) + ' m ' + x2.toFixed(2) + ' ' + yy.toFixed(2) + ' l S Q');
   const newPage = (first) => {
     ops = ['0.6 w 0 0 0 RG 0 0 0 rg']; pages.push(ops);
-    if (!final) ops.push('q 0.88 g BT /F2 64 Tf 0.819 0.574 -0.574 0.819 150 300 Tm (DRAFT) Tj ET Q');
+    if (!final) ops.push('q 0.88 g BT /F2 64 Tf 0.819 0.574 -0.574 0.819 ' + (r.status === 'W' ? 110 : 150) + ' 300 Tm (' + (r.status === 'W' ? 'WITHDRAWN' : 'DRAFT') + ') Tj ET Q');
     if (first) {
       const top = PH - 34;
       let tx = M;
@@ -1102,7 +1202,7 @@ function buildPdf(r, imgs) {
       const ry = top - 80;
       bar(M, PW - M, ry, 1.4, GREEN); bar(M, M + 64, ry, 3.2, YELLOW);
       fill(M, ry - 30, CW, 24, TINT);
-      Tk(M + 10, ry - 22.5, 'DISCHARGE SUMMARY', 13, true, GREEN);
+      Tk(M + 10, ry - 22.5, r._cert ? CTITLE[r._cert.ctype] : 'DISCHARGE SUMMARY', 13, true, GREEN);
       if (r.ds_no) T_(PW - M - 10 - tw('No. ' + r.ds_no, 10.5, true), ry - 22, 'No. ' + r.ds_no, 10.5, true);
       y = ry - 40;
     } else {
@@ -1113,72 +1213,89 @@ function buildPdf(r, imgs) {
   };
   const need = (h) => { if (y - h < M) newPage(false); };
   newPage(true);
-  // the patient box, as on the pad
-  const cell = (x, yy, w, h, label, val) => { ops.push('q 0.72 G 0.7 w'); rect(x, yy - h, w, h); ops.push('Q'); Tk(x + 6, yy - 11, label, 7, true, GREY); wrap(val, 10.5, w - 12).slice(0, 2).forEach((l, i) => T_(x + 6, yy - 24.5 - i * 12, l, 10.5, false)); };
-  const code = (k) => (s_(r[k]) ? codeLabel_(k, r[k]) : '');
-  const gp = (s_(r.gravida) || s_(r.para)) ? 'G' + (s_(r.gravida) || '?') + ' P' + (s_(r.para) || '?') : '';
-  const rows = [
-    [[0.58, 'NAME', r.name], [0.42, 'HUSBAND\u2019S / FATHER\u2019S NAME', r.father_husband]],
-    [[0.12, 'AGE', r.age], [0.14, 'GRAVIDA / PARA', gp], [0.16, 'GESTATION', s_(r.gest_weeks) ? r.gest_weeks + ' weeks' : ''], [0.18, 'MARITAL STATUS', code('marital')], [0.18, 'RELIGION', code('religion')], [0.22, 'DATE', dmy(r.date)]],
-    [[0.2, 'DATE OF ADMISSION', dmy(r.admit_date)], [0.2, 'DATE OF OPERATION', dmy(r.op_date)], [0.2, 'DATE OF DISCHARGE', dmy(r.discharge_date)], [0.4, 'CONSULTANT', r.consultant]]
-  ];
-  rows.forEach((row) => { let x = M; const h = row.some((c) => wrap(c[2] || '', 10.5, c[0] * CW - 12).length > 1) ? 42 : 32; row.forEach((c) => { cell(x, y, c[0] * CW, h, c[1], c[2] || ''); x += c[0] * CW; }); y -= h; });
-  y -= 14;
-  // The details: two columns, medicines (with their Urdu wording) across the page, then the signature.
-  // The text size steps down from 10 to 8 pt only as far as needed to keep the summary on one page; longer ones flow onto more pages.
-  const text = (k) => (k === 'final_diagnoses' ? [gpLine_(r), s_(r[k])].filter(Boolean).join('\n')
-    : k === 'physical_findings' ? s_(r[k]).split('\n').map((x) => x.trim().replace(/[.,;]+$/, '')).filter(Boolean).join(', ')
-    : s_(r[k]));
-  const LEFT = [[colDef('final_diagnoses').label, text('final_diagnoses')], [colDef('history').label, text('history')], [colDef('physical_findings').label, text('physical_findings')], ['Investigations', labsLine_(r)]];
-  const RIGHT = [[colDef('course').label, text('course')], [colDef('follow_up').label, [fuLine_(r), text('follow_up')].filter(Boolean).join('\n')]];
-  const urdu = (imgs && imgs.urdu) || [];
-  const meds = s_(r.discharge_meds).split('\n').map((l) => l.trim()).filter(Boolean).map((l, i) => ({ en: medEnglish_(l), ur: urdu[i] && urdu[i].bytes && urdu[i].bytes.length ? urdu[i] : null }));
-  const GAP = 18, C2 = (CW - GAP) / 2, ENW = CW * 0.56, URX = M + ENW + 10, URW = PW - M - URX, SIG = 78, FOOT = M;                     // no footer: the page ends with the signature
-  const lhOf = (fs) => fs * 1.32;
-  const blockH = (bk, w, fs) => 15 + Math.max(1, wrap(bk[1] || '-', fs, w - 4).length) * lhOf(fs) + 8;
-  const urSize = (u, fs) => { const k = fs * 0.95 / (u.px || 52), k2 = u.g.w * k > URW ? URW / u.g.w : k; return { w: u.g.w * k2, h: u.g.h * k2, base: (u.base === undefined ? u.g.h * 0.4 : u.base) * k2 }; };   // base: image bottom to baseline
-  const medRowH = (m, fs) => { const z = m.ur ? urSize(m.ur, fs) : null; return Math.max(wrap(m.en, fs, ENW).length * lhOf(fs), z ? z.h + 2 : 0) + 3; };
-  const medsH = (fs) => 15 + (meds.length ? meds.reduce((t, m) => t + medRowH(m, fs), 0) : lhOf(fs)) + 8;
-  const fit = [10, 9.5, 9, 8.5, 8].filter((fs) => Math.max(LEFT.reduce((t, b) => t + blockH(b, C2, fs), 0), RIGHT.reduce((t, b) => t + blockH(b, C2, fs), 0)) + medsH(fs) + SIG <= y - FOOT)[0];
   const urNames = [];
-  let headW = C2;
-  const head = (x, yy, t, fs) => { Tk(x, yy, t.toUpperCase(), fs + 0.3, true, GREEN); ops.push('q 0.78 0.86 0.81 RG 0.6 w ' + x.toFixed(2) + ' ' + (yy - 3.5).toFixed(2) + ' m ' + (x + headW).toFixed(2) + ' ' + (yy - 3.5).toFixed(2) + ' l S Q'); };
-  const drawBlock = (x, w, bk, fs, flow) => {
-    if (flow) need(34);
-    headW = w;
-    head(x, y, bk[0], fs); y -= 15;
-    wrap(bk[1] || '-', fs, w - 4).forEach((l) => { if (flow) need(lhOf(fs) + 2); T_(x + 3, y, l, fs, /^Next visit:/.test(l)); y -= lhOf(fs); });
-    y -= 8;
-  };
-  const drawMeds = (fs, flow) => {
-    if (flow) need(40);
-    headW = CW;
-    head(M, y, colDef('discharge_meds').label, fs); y -= 15;
-    if (!meds.length) { T_(M + 3, y, '-', fs, false); y -= lhOf(fs); }
-    meds.forEach((m) => {
-      const rh = medRowH(m, fs);
-      if (flow) need(rh + 2);
-      wrap(m.en, fs, ENW).forEach((l, i) => T_(M + 3, y - i * lhOf(fs), l, fs, false));
-      if (m.ur) {
-        const z = urSize(m.ur, fs), nm = 'U' + urNames.length; urNames.push({ nm, u: m.ur });
-        ops.push('q ' + z.w.toFixed(2) + ' 0 0 ' + z.h.toFixed(2) + ' ' + (PW - M - z.w).toFixed(2) + ' ' + (y - z.base).toFixed(2) + ' cm /' + nm + ' Do Q');   // Urdu baseline on the English baseline
-      }
-      y -= rh;
-    });
-    y -= 8;
-  };
-  if (fit) {
-    const top = y;
-    LEFT.forEach((bk) => drawBlock(M, C2, bk, fit, false));
-    const yl = y; y = top;
-    ops.push('0.8 G ' + (M + C2 + GAP / 2).toFixed(2) + ' ' + (top + 6).toFixed(2) + ' m ' + (M + C2 + GAP / 2).toFixed(2) + ' ' + (Math.min(yl, top) + 4).toFixed(2) + ' l S 0 G');                                  // a faint rule between the columns
-    RIGHT.forEach((bk) => drawBlock(M + C2 + GAP, C2, bk, fit, false));
-    y = Math.min(yl, y);
-    drawMeds(fit, false);
+  const SIG = 78;
+  if (r._cert) {                                         // a medical certificate: the patient line, the certificate's paragraphs, then the signature
+    const c = r._cert, n = certDays_(c);
+    const cell = (x, yy, w, label, val) => { ops.push('q 0.72 G 0.7 w'); rect(x, yy - 32, w, 32); ops.push('Q'); Tk(x + 6, yy - 11, label, 7, true, GREY); T_(x + 6, yy - 24.5, wrap(val, 10.5, w - 12)[0] || '', 10.5, false); };
+    const boxes = c.ctype === 'A' ? [[0.4, 'ATTENDANT', c.attendant + (c.relation ? ' (' + c.relation + ')' : '')], [0.38, 'PATIENT', (c.title ? c.title + ' ' : '') + c.patient], [0.22, 'DATE OF ISSUE', dmy_(c.issued_on)]]
+      : [[0.4, 'PATIENT', (c.title ? c.title + ' ' : '') + c.patient], [0.38, 'HUSBAND’S / FATHER’S NAME', c.guardian], [0.22, 'DATE OF ISSUE', dmy_(c.issued_on)]];
+    let x = M; boxes.forEach((b) => { cell(x, y, b[0] * CW, b[1], b[2] || ''); x += b[0] * CW; }); y -= 32;
+    const per = c.ctype === 'F' ? [[0.4, 'FIT TO RESUME FROM', dmy_(c.from_date)], [0.38, 'FOR', codeLabel2_(PURPOSES, c.purpose)], [0.22, 'SUMMARY NO.', c.ds_no]]
+      : [[0.2, 'FROM', dmy_(c.from_date)], [0.2, 'TO', dmy_(c.to_date)], [0.18, 'DAYS', String(n)], [0.2, c.ctype === 'A' ? 'FOR' : 'MAY RESUME ON', c.ctype === 'A' ? codeLabel2_(PURPOSES, c.purpose) : dmy_(isoFromDay_(dayNo_(c.to_date) + 1))], [0.22, 'SUMMARY NO.', c.ds_no]];
+    x = M; per.forEach((b) => { cell(x, y, b[0] * CW, b[1], b[2] || ''); x += b[0] * CW; }); y -= 32;
+    y -= 30;
+    if (s_(c.addressed_to)) { T_(M, y, 'To: ' + c.addressed_to, 11, true); y -= 24; }
+    else { T_(M, y, 'To whom it may concern', 11, true); y -= 24; }
+    certText_(c).forEach((para) => { wrap(para, 11.5, CW).forEach((l) => { T_(M, y, l, 11.5, false); y -= 17; }); y -= 9; });
+    y = Math.min(y - 30, M + SIG + 140);
   } else {
-    LEFT.concat(RIGHT.slice(0, 1)).forEach((bk) => drawBlock(M, CW, bk, 9.5, true));
-    drawMeds(9.5, true);
-    drawBlock(M, CW, RIGHT[1], 9.5, true);
+    // the patient box, as on the pad
+    const cell = (x, yy, w, h, label, val) => { ops.push('q 0.72 G 0.7 w'); rect(x, yy - h, w, h); ops.push('Q'); Tk(x + 6, yy - 11, label, 7, true, GREY); wrap(val, 10.5, w - 12).slice(0, 2).forEach((l, i) => T_(x + 6, yy - 24.5 - i * 12, l, 10.5, false)); };
+    const code = (k) => (s_(r[k]) ? codeLabel_(k, r[k]) : '');
+    const gp = (s_(r.gravida) || s_(r.para)) ? 'G' + (s_(r.gravida) || '?') + ' P' + (s_(r.para) || '?') : '';
+    const rows = [
+      [[0.58, 'NAME', r.name], [0.42, 'HUSBAND\u2019S / FATHER\u2019S NAME', r.father_husband]],
+      [[0.12, 'AGE', r.age], [0.14, 'GRAVIDA / PARA', gp], [0.16, 'GESTATION', s_(r.gest_weeks) ? r.gest_weeks + ' weeks' : ''], [0.18, 'MARITAL STATUS', code('marital')], [0.18, 'RELIGION', code('religion')], [0.22, 'DATE', dmy(r.date)]],
+      [[0.2, 'DATE OF ADMISSION', dmy(r.admit_date)], [0.2, 'DATE OF OPERATION', dmy(r.op_date)], [0.2, 'DATE OF DISCHARGE', dmy(r.discharge_date)], [0.4, 'CONSULTANT', r.consultant]]
+    ];
+    rows.forEach((row) => { let x = M; const h = row.some((c) => wrap(c[2] || '', 10.5, c[0] * CW - 12).length > 1) ? 42 : 32; row.forEach((c) => { cell(x, y, c[0] * CW, h, c[1], c[2] || ''); x += c[0] * CW; }); y -= h; });
+    y -= 14;
+    // The details: two columns, medicines (with their Urdu wording) across the page, then the signature.
+    // The text size steps down from 10 to 8 pt only as far as needed to keep the summary on one page; longer ones flow onto more pages.
+    const text = (k) => (k === 'final_diagnoses' ? [gpLine_(r), s_(r[k])].filter(Boolean).join('\n')
+      : k === 'physical_findings' ? s_(r[k]).split('\n').map((x) => x.trim().replace(/[.,;]+$/, '')).filter(Boolean).join(', ')
+      : s_(r[k]));
+    const LEFT = [[colDef('final_diagnoses').label, text('final_diagnoses')], [colDef('history').label, text('history')], [colDef('physical_findings').label, text('physical_findings')], ['Investigations', labsLine_(r)]];
+    const RIGHT = [[colDef('course').label, text('course')], [colDef('follow_up').label, [fuLine_(r), text('follow_up')].filter(Boolean).join('\n')]];
+    const urdu = (imgs && imgs.urdu) || [];
+    const meds = s_(r.discharge_meds).split('\n').map((l) => l.trim()).filter(Boolean).map((l, i) => ({ en: medEnglish_(l), ur: urdu[i] && urdu[i].bytes && urdu[i].bytes.length ? urdu[i] : null }));
+    const GAP = 18, C2 = (CW - GAP) / 2, ENW = CW * 0.56, URX = M + ENW + 10, URW = PW - M - URX, FOOT = M;                     // no footer: the page ends with the signature
+    const lhOf = (fs) => fs * 1.32;
+    const blockH = (bk, w, fs) => 15 + Math.max(1, wrap(bk[1] || '-', fs, w - 4).length) * lhOf(fs) + 8;
+    const urSize = (u, fs) => { const k = fs * 0.95 / (u.px || 52), k2 = u.g.w * k > URW ? URW / u.g.w : k; return { w: u.g.w * k2, h: u.g.h * k2, base: (u.base === undefined ? u.g.h * 0.4 : u.base) * k2 }; };   // base: image bottom to baseline
+    const medRowH = (m, fs) => { const z = m.ur ? urSize(m.ur, fs) : null; return Math.max(wrap(m.en, fs, ENW).length * lhOf(fs), z ? z.h + 2 : 0) + 3; };
+    const medsH = (fs) => 15 + (meds.length ? meds.reduce((t, m) => t + medRowH(m, fs), 0) : lhOf(fs)) + 8;
+    const fit = [10, 9.5, 9, 8.5, 8].filter((fs) => Math.max(LEFT.reduce((t, b) => t + blockH(b, C2, fs), 0), RIGHT.reduce((t, b) => t + blockH(b, C2, fs), 0)) + medsH(fs) + SIG <= y - FOOT)[0];
+    let headW = C2;
+    const head = (x, yy, t, fs) => { Tk(x, yy, t.toUpperCase(), fs + 0.3, true, GREEN); ops.push('q 0.78 0.86 0.81 RG 0.6 w ' + x.toFixed(2) + ' ' + (yy - 3.5).toFixed(2) + ' m ' + (x + headW).toFixed(2) + ' ' + (yy - 3.5).toFixed(2) + ' l S Q'); };
+    const drawBlock = (x, w, bk, fs, flow) => {
+      if (flow) need(34);
+      headW = w;
+      head(x, y, bk[0], fs); y -= 15;
+      wrap(bk[1] || '-', fs, w - 4).forEach((l) => { if (flow) need(lhOf(fs) + 2); T_(x + 3, y, l, fs, /^Next visit:/.test(l)); y -= lhOf(fs); });
+      y -= 8;
+    };
+    const drawMeds = (fs, flow) => {
+      if (flow) need(40);
+      headW = CW;
+      head(M, y, colDef('discharge_meds').label, fs); y -= 15;
+      if (!meds.length) { T_(M + 3, y, '-', fs, false); y -= lhOf(fs); }
+      meds.forEach((m) => {
+        const rh = medRowH(m, fs);
+        if (flow) need(rh + 2);
+        wrap(m.en, fs, ENW).forEach((l, i) => T_(M + 3, y - i * lhOf(fs), l, fs, false));
+        if (m.ur) {
+          const z = urSize(m.ur, fs), nm = 'U' + urNames.length; urNames.push({ nm, u: m.ur });
+          ops.push('q ' + z.w.toFixed(2) + ' 0 0 ' + z.h.toFixed(2) + ' ' + (PW - M - z.w).toFixed(2) + ' ' + (y - z.base).toFixed(2) + ' cm /' + nm + ' Do Q');   // Urdu baseline on the English baseline
+        }
+        y -= rh;
+      });
+      y -= 8;
+    };
+    if (fit) {
+      const top = y;
+      LEFT.forEach((bk) => drawBlock(M, C2, bk, fit, false));
+      const yl = y; y = top;
+      ops.push('0.8 G ' + (M + C2 + GAP / 2).toFixed(2) + ' ' + (top + 6).toFixed(2) + ' m ' + (M + C2 + GAP / 2).toFixed(2) + ' ' + (Math.min(yl, top) + 4).toFixed(2) + ' l S 0 G');                                  // a faint rule between the columns
+      RIGHT.forEach((bk) => drawBlock(M + C2 + GAP, C2, bk, fit, false));
+      y = Math.min(yl, y);
+      drawMeds(fit, false);
+    } else {
+      LEFT.concat(RIGHT.slice(0, 1)).forEach((bk) => drawBlock(M, CW, bk, 9.5, true));
+      drawMeds(9.5, true);
+      drawBlock(M, CW, RIGHT[1], 9.5, true);
+    }
   }
   need(SIG); y -= 18;
   const sx = PW - M - 200, sig = [];                    // the consultant's details, printed once, under the signature line
@@ -1194,7 +1311,7 @@ function buildPdf(r, imgs) {
   if (vurl) {                                            // verification QR, bottom left: from the signature line down to the consultant's last line
     const qb = lastBase - 1.5, qs = Math.max(58, y - qb), qx = M, tx = M + qs + 10;
     ops.push(qrOps(vurl, qx, qb + qs, qs).ops);
-    Tk(tx, qb + 47, 'SCAN TO VERIFY THIS SUMMARY', 8, true, GREEN);
+    Tk(tx, qb + 47, 'SCAN TO VERIFY THIS ' + (r._cert ? 'CERTIFICATE' : 'SUMMARY'), 8, true, GREEN);
     Tk(tx, qb + 35, 'Verification code', 7, false, GREY);
     T_(tx, qb + 23, vcodeShow_(r.vcode), 10, true);
     Tk(tx, qb + 10.5, 'Check the page opens at ' + VERIFY_PAGE.replace(/^https:\/\//, '').replace(/\/v\.html$/, ''), 6.5, false, GREY);
@@ -1224,7 +1341,7 @@ function buildPdf(r, imgs) {
   objs.forEach((b, i) => { offs.push(len); put((i + 1) + ' 0 obj\n'); (Array.isArray(b) ? b : [b]).forEach(put); put('\nendobj\n'); });
   const xref = len;
   put('xref\n0 ' + (objs.length + 1) + '\n0000000000 65535 f \n' + offs.map((o) => String(o).padStart(10, '0') + ' 00000 n \n').join(''));
-  put('trailer\n<< /Size ' + (objs.length + 1) + ' /Root ' + catalog + ' 0 R /Info << /Title (' + esc(pdfText('Discharge summary ' + (r.ds_no || '') + ' ' + (r.name || ''))) + ') /Producer (Bari Discharge) >> >>\nstartxref\n' + xref + '\n%%EOF\n');
+  put('trailer\n<< /Size ' + (objs.length + 1) + ' /Root ' + catalog + ' 0 R /Info << /Title (' + esc(pdfText((r._cert ? 'Medical certificate ' : 'Discharge summary ') + (r.ds_no || '') + ' ' + (r.name || ''))) + ') /Producer (Bari Discharge) >> >>\nstartxref\n' + xref + '\n%%EOF\n');
   void enc;
   const out = new Uint8Array(len); let p0 = 0; parts.forEach((b) => { out.set(b, p0); p0 += b.length; });
   return out;

@@ -154,3 +154,7 @@ main { padding: 12px; max-width: 720px; margin: 0 auto; }
 .fupart { margin: 8px 0; }
 .row2.pick { margin-top: 8px; align-items: center; }
 .fulog { margin-top: 8px; } .fulog summary { color: var(--link); cursor: pointer; }
+/* Medical certificates */
+.certrow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.certrow .main { flex: 1; min-width: 0; } .certrow.gone b { text-decoration: line-through; color: var(--muted); }
+.certprev { font-size: 15px; line-height: 1.5; } .certprev p { margin: 0 0 8px; }

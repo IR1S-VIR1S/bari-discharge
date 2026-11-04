@@ -27,18 +27,21 @@
     .then((d) => {
       if (!d || !d.ok) throw new Error('no answer');
       const codeLine = el('p', 'small', 'Verification code ', el('b', null, d.code || code.toUpperCase()));
-      if (d.state === 'unknown') { show(result('unknown', 'No such summary', 'Bari Hospital has no discharge summary with this code. The document may be forged or the QR code copied from another paper.'), codeLine, call); return; }
+      if (d.state === 'unknown') { show(result('unknown', 'Not found', 'Bari Hospital has no discharge summary or certificate with this code. The document may be forged or the QR code copied from another paper.'), codeLine, call); return; }
+      const What = d.what ? d.what.charAt(0).toUpperCase() + d.what.slice(1) : 'Discharge summary';
+      if (d.state === 'withdrawn' && d.kind === 'certificate') { show(result('withdrawn', 'Withdrawn', What + ' ' + d.ds_no + ' was withdrawn by the hospital' + (d.reason ? ' (' + d.reason.toLowerCase() + ')' : '') + '. It is not valid.'), codeLine, call); return; }
       if (d.state === 'withdrawn') { show(result('withdrawn', 'Withdrawn', 'Discharge summary ' + d.ds_no + ' was reopened for correction. This printed copy is not valid; ask the hospital for the corrected summary.'), codeLine, call); return; }
       const head = d.state === 'valid'
-        ? result('valid', '✓ Genuine and current', 'Discharge summary ' + d.ds_no + ' was issued by Bari Hospital' + (d.finalised_on ? ' and finalised on ' + d.finalised_on.split('-').reverse().join('-') : '') + '. The paper matches the current record.')
+        ? result('valid', '✓ Genuine and current', What + ' ' + d.ds_no + ' was issued by Bari Hospital' + (d.finalised_on ? ' on ' + d.finalised_on.split('-').reverse().join('-') : '') + '. The paper matches the hospital’s record.')
+        : d.kind === 'certificate' ? result('amended', 'Does not match the record', 'Bari Hospital issued ' + d.what + ' ' + d.ds_no + ', but this paper does not match it and may have been altered. Ask the hospital.')
         : result('amended', 'Genuine, but this copy is out of date', 'Discharge summary ' + d.ds_no + ' was issued by Bari Hospital, but it has been amended since this copy was printed. Ask the hospital for the current copy before relying on it.');
       const rows = (d.details || []).slice();
       if (d.gp) rows.splice(Math.min(3, rows.length), 0, ['Obstetric', d.gp]);
       const card = el('section', 'card', el('h2', null, 'Compare with the paper'), ...rows.map((p) => el('div', 'kv', el('span', 'k', p[0]), el('span', 'v', p[1]))));
       const tips = el('section', 'card', el('h2', null, 'Before you accept it'), el('ul', 'tips',
-        el('li', null, 'Every detail above must match the paper exactly. A different name, date or diagnosis means the paper was altered.'),
+        el('li', null, 'Every detail above must match the paper exactly. A different name or date means the paper was altered.'),
         el('li', null, 'This page must open at ir1s-vir1s.github.io. The hospital never asks for a password, card or payment here.'),
-        el('li', null, 'Medicines, history and results are not shown here, to protect the patient’s privacy.')));
+        el('li', null, d.kind === 'certificate' ? 'The diagnosis appears only if the patient agreed to have it on the certificate.' : 'Medicines, history and results are not shown here, to protect the patient’s privacy.')));
       show(head, card, codeLine, tips, call);
     })
     .catch(() => show(result('fail', 'Could not check right now', 'The hospital’s record did not answer. Check the internet connection and scan again.'), call));

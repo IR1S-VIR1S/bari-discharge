@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.3
+ *  BARI HOSPITAL: OBSTETRIC DISCHARGE SUMMARY SYSTEM v1.4
  *  4 November 2026. One file: paste into the spreadsheet's Apps Script editor.
  * ============================================================================
  *  Keeps one row per discharge in the tab DISCHARGES, with the same headings as the
@@ -15,6 +15,7 @@
  *    TEMPLATES    whole-summary templates saved from the phone (clinical sections only)
  *    STAFF        consultant and medical officer names offered as buttons
  *    FOLLOW_UPS   every follow-up not yet attended or closed, soonest first (a live view: do not type in it)
+ *    CERTIFICATES medical certificates (sick leave, maternity leave, fitness, attendant) issued from final summaries
  *    LOG          who changed what and when (field names only, not the text)
  *
  *  Install:
@@ -31,7 +32,7 @@
  */
 
 const CFG = {
-  VERSION: '1.3',
+  VERSION: '1.4',
   SCHEMA_VER: 4,                      // 2: obstetric layout (G/P, weeks, co-morbid, operation date, Hb/TLC/PLT); 3: follow-up calendar and patient phone; 4: verification code
   TZ: 'Asia/Karachi',
   MENU: 'Bari Discharge',
@@ -113,6 +114,16 @@ const SEED_VER = '2';                // bump when the starter buttons change: se
 const JOINS = [['N', 'new line'], ['S', 'same line'], ['C', 'same line, after a comma']];
 const TEMPLATE_COLS = ['tid', 'name'].concat(SECTIONS).concat(['saved_by', 'saved_on']);
 const STAFF_COLS = ['name', 'role', 'specialty', 'qualifications', 'phone'];
+// Medical certificates. Each is issued from a final summary by a consultant, once, and never edited: a mistake is withdrawn and a new one issued.
+// The patient's details are copied in at issue, so the certificate reads the same even if the summary is amended later.
+const CERT_COLS = ['cert_no', 'cuid', 'ds_uid', 'ds_no', 'ctype', 'purpose', 'addressed_to', 'patient', 'title', 'guardian', 'age', 'admit_date', 'discharge_date', 'birth_date',
+  'attendant', 'relation', 'from_date', 'to_date', 'exam_date', 'issued_on', 'show_dx', 'dx', 'advice', 'doctor', 'status', 'vcode', 'issued_by', 'issued_at', 'withdrawn_by', 'withdrawn_at', 'withdraw_reason'];
+const CTYPES = [['R', 'Sick leave'], ['M', 'Maternity leave'], ['F', 'Fitness to resume'], ['A', 'Attendant']];
+const CTITLE = { R: 'MEDICAL CERTIFICATE', M: 'MATERNITY LEAVE CERTIFICATE', F: 'CERTIFICATE OF FITNESS', A: 'ATTENDANT CERTIFICATE' };
+const PURPOSES = [['W', 'Work'], ['S', 'School, college or university']];
+const RELATIONS = ['Husband', 'Mother', 'Father', 'Sister', 'Brother', 'Mother-in-law', 'Son', 'Daughter'];
+const CERT_ADVICE = ['Avoid lifting heavy weight for 6 weeks', 'Light duties for 2 weeks', 'Shorter working hours for 2 weeks', 'Avoid prolonged standing for 2 weeks', 'Breastfeeding breaks during working hours'];
+const CERT_MAX = { R: 90, M: 180, F: 0, A: 30 };
 
 // ---------------------------------------------------------------- helpers (shared with the phone)
 function str_(v) { return v === null || v === undefined ? '' : String(v).trim(); }
@@ -251,12 +262,57 @@ function printedText_(row) { return FP_KEYS.map(function (k) { return k + '=' + 
 function vcodeShow_(c) { return str_(c).toUpperCase().replace(/(.{4})(?=.)/g, '$1-'); }       // 3F9A-01C2-77DE-B410
 function verifyUrl_(api, row, fp) { const m = /\/macros\/s\/([\w-]+)\/exec/.exec(str_(api)); return m && str_(row.vcode) ? VERIFY_PAGE + '#' + m[1] + '.' + row.vcode + '.' + fp : ''; }
 
+// ---------------------------------------------------------------- certificate wording (shared with the phone)
+function codeLabel2_(list, v) { const p = list.filter(function (x) { return x[0] === code_(v); })[0]; return p ? p[1] : str_(v); }
+function dmy_(iso) { return str_(iso).split('-').reverse().join('-'); }
+function certDays_(c) { const a = dayNo_(c.from_date), b = dayNo_(c.to_date); return a !== null && b !== null ? b - a + 1 : 0; }
+// The certificate's body as paragraphs. Diagnosis appears only when the patient agreed (show_dx Y).
+function certText_(c) {
+  const t = code_(c.ctype), who = (str_(c.title) || 'Mrs') + ' ' + str_(c.patient), rel = str_(c.guardian) ? (str_(c.title) === 'Ms' ? ', daughter of ' : ', wife of ') + str_(c.guardian) : '';
+  const age = str_(c.age) ? ', aged ' + str_(c.age) + (/\d$/.test(str_(c.age)) ? ' years' : '') : '';
+  const stay = 'was admitted to Bari Hospital on ' + dmy_(c.admit_date) + ' and discharged on ' + dmy_(c.discharge_date);
+  const birth = str_(c.birth_date) ? ' She gave birth on ' + dmy_(c.birth_date) + '.' : '';
+  const dx = code_(c.show_dx) === 'Y' && str_(c.dx) ? str_(c.dx) : 'a medical condition';
+  const doing = code_(c.purpose) === 'S' ? 'attend her studies' : 'attend her duties';
+  const n = certDays_(c), per = 'from ' + dmy_(c.from_date) + ' to ' + dmy_(c.to_date) + ' (' + n + ' day' + (n === 1 ? '' : 's') + ')';
+  const resume = dayNo_(c.to_date) !== null ? isoFromDay_(dayNo_(c.to_date) + 1) : '';
+  const out = [];
+  if (t === 'A') {
+    out.push('This is to certify that ' + str_(c.attendant) + (str_(c.relation) ? ' (' + str_(c.relation).toLowerCase() + ' of the patient)' : '') + ' stayed with ' + who + rel + age + ' as her attendant while she was in Bari Hospital, ' + per + '.' + (str_(c.birth_date) && /husband/i.test(c.relation) ? ' His wife gave birth on ' + dmy_(c.birth_date) + '.' : ''));
+    out.push('His or her presence was needed to look after the patient during this period.'.replace('His or her', /husband|father|brother|son/i.test(c.relation) ? 'His' : 'Her'));
+  } else {
+    out.push('This is to certify that ' + who + rel + age + (rel || age ? ', ' : ' ') + stay + '.' + birth + (str_(c.exam_date) ? ' I examined her on ' + dmy_(c.exam_date) + '.' : ''));
+    if (t === 'R') out.push('In my opinion she ' + (dayNo_(c.from_date) < dayNo_(c.issued_on) ? 'was, and is,' : 'is') + ' unfit to ' + doing + ' owing to ' + dx + ', ' + per + '. She may resume on ' + dmy_(resume) + '.');
+    if (t === 'M') out.push('Maternity leave is recommended ' + per + '. She may resume on ' + dmy_(resume) + '.');
+    if (t === 'F') out.push('She has recovered' + (code_(c.show_dx) === 'Y' && str_(c.dx) ? ' from ' + str_(c.dx) : '') + ' and is fit to ' + doing.replace('attend', 'resume') + ' from ' + dmy_(c.from_date) + '.');
+  }
+  if (str_(c.advice)) out.push('Advice: ' + str_(c.advice).split('\n').map(function (x) { return str_(x).replace(/\.$/, ''); }).filter(function (x) { return x; }).join('; ') + '.');
+  if (t !== 'F' && dayNo_(c.from_date) !== null && dayNo_(c.from_date) < dayNo_(c.issued_on)) out.push('The days before the date of this certificate are certified from the hospital record of her admission.');
+  return out;
+}
+function certProblems_(c) {
+  const t = code_(c.ctype), a = dayNo_(c.from_date), b = dayNo_(c.to_date), ad = dayNo_(c.admit_date), dc = dayNo_(c.discharge_date), is = dayNo_(c.issued_on);
+  if (!CTYPES.some(function (x) { return x[0] === t; })) return 'choose the kind of certificate';
+  if (a === null) return t === 'F' ? 'choose the date she may resume' : 'choose the first day';
+  if (t !== 'F' && (b === null || b < a)) return 'the last day must be on or after the first day';
+  if (ad !== null && a < ad) return 'the certificate cannot start before the date of admission (' + dmy_(c.admit_date) + ')';
+  if (t !== 'F' && certDays_(c) > CERT_MAX[t]) return 'at most ' + CERT_MAX[t] + ' days for this certificate';
+  if (t === 'A' && dc !== null && b > dc) return 'an attendant certificate covers the stay in hospital only (to ' + dmy_(c.discharge_date) + ')';
+  if (t === 'A' && str_(c.attendant).length < 3) return 'enter the attendant’s name';
+  if (t === 'F' && dc !== null && a < dc) return 'fitness starts on or after the date of discharge';
+  if (str_(c.exam_date) && (dayNo_(c.exam_date) === null || dayNo_(c.exam_date) > is)) return 'the date of examination cannot be after today';
+  if (code_(c.show_dx) === 'Y' && !str_(c.dx)) return 'type the diagnosis to show, or leave it hidden';
+  if (str_(c.advice).length > 400 || str_(c.addressed_to).length > 120 || str_(c.dx).length > 200) return 'too long';
+  return '';
+}
+function certPrinted_(c) { return [c.cert_no, c.ctype, c.patient, c.guardian, c.from_date, c.to_date, c.issued_on, c.doctor].concat(certText_(c)).map(str_).join('\u001f').toUpperCase(); }
+
 // ---------------------------------------------------------------- roles (shared with the phone)
 const ROLE_NAMES = { pi: 'PI', consultant: 'Consultant', mo: 'Medical officer' };
 function roleCan_(role, what) {
   if (role === 'pi') return true;
   if (what === 'edit' || what === 'quickAdd') return role === 'consultant' || role === 'mo';
-  if (what === 'finalise' || what === 'template') return role === 'consultant';
+  if (what === 'finalise' || what === 'template' || what === 'certify') return role === 'consultant';
   return false;                        // quickLive, quickApprove, invite: PI only
 }
 const APP_JOIN_DAYS = 7;
@@ -290,7 +346,7 @@ function onOpen() {                      // used only when this file is pasted o
   m.addToUi();
 }
 // What the loader calls. Every entry point must be listed here.
-const RELEASE_NOTE = 'QR verification of final summaries; follow-up calendar (next visit, patient mobile, missed and rebook, WhatsApp reminder)';   // shown by "PI: install update"
+const RELEASE_NOTE = 'medical certificates (sick, maternity, fitness, attendant); QR verification of final summaries; follow-up calendar (next visit, patient mobile, missed and rebook, WhatsApp reminder)';   // shown by "PI: install update"
 function exports_() {
   return { VERSION: CFG.VERSION, RELEASE_NOTE: RELEASE_NOTE, SCHEMA_VER: CFG.SCHEMA_VER, MENU: CFG.MENU, MENU_ITEMS: MENU_ITEMS,
     setup: setup, menuUsers: menuUsers, menuInvite: menuInvite, menuRevoke: menuRevoke, menuApproveQuick: menuApproveQuick, doGet: doGet, doPost: doPost };
@@ -348,13 +404,14 @@ function sheet_(ss, name, cols, opts) {
 function buildAll_(ss) {
   const dk = DCOLS.map(function (c) { return c.key; }), d0 = ss.getSheetByName('DISCHARGES');
   if (d0 && !headerOk_(d0, dk) && d0.getLastRow() <= 1) rewriteTab_(d0, dk);           // empty records tab: take the new layout
-  ['QUICK', 'TEMPLATES', 'STAFF'].forEach(function (n) { const sh = ss.getSheetByName(n), c = { QUICK: QUICK_COLS, TEMPLATES: TEMPLATE_COLS, STAFF: STAFF_COLS }[n]; if (sh && !headerOk_(sh, c)) rewriteTab_(sh, c); });
+  ['QUICK', 'TEMPLATES', 'STAFF', 'CERTIFICATES'].forEach(function (n) { const sh = ss.getSheetByName(n), c = { QUICK: QUICK_COLS, TEMPLATES: TEMPLATE_COLS, STAFF: STAFF_COLS, CERTIFICATES: CERT_COLS }[n]; if (sh && !headerOk_(sh, c)) rewriteTab_(sh, c); });
   const d = sheet_(ss, 'DISCHARGES', dk, { wide: SECTIONS });
   d.getRange(1, 1, 1, DCOLS.length).setNotes([DCOLS.map(function (c) { return c.label + (c.codes ? '\n' + c.codes.map(function (p) { return p[0] + ' = ' + p[1]; }).join('\n') : ''); })]);
   const q = sheet_(ss, 'QUICK', QUICK_COLS, { wide: ['phrase'] });
   seedQuick_(q);
   q.getRange(1, 1, 1, QUICK_COLS.length).setNotes([['Made by the system', 'Which section the button belongs to: ' + SECTIONS.join(', '), 'A heading that groups buttons inside a section',
     'N = new line, S = same line, C = same line after a comma', 'The text the button inserts. ___ marks a blank the doctor fills in', 'draft = PI phone only until approved; live = everyone', '', '', 'D or H: shown only when the Diabetes or Hypertension box is ticked']]);
+  sheet_(ss, 'CERTIFICATES', CERT_COLS, { wide: ['advice'] });
   const tp = sheet_(ss, 'TEMPLATES', TEMPLATE_COLS, { wide: SECTIONS });
   seedDefault_(tp); seedTemplates_(tp);
   const st = sheet_(ss, 'STAFF', STAFF_COLS);
@@ -712,6 +769,8 @@ function doPost(e) {
     if (req.op === 'quick_delete') return appJson_(quickDelete_(u, req));
     if (req.op === 'template_save') return appJson_(templateSave_(u, req));
     if (req.op === 'template_delete') return appJson_(templateDelete_(u, req));
+    if (req.op === 'cert_issue') return appJson_(certIssue_(u, req));
+    if (req.op === 'cert_withdraw') return appJson_(certWithdraw_(u, req));
     if (req.op === 'invite') return appJson_(appInvite_(u, req));
     return appJson_({ ok: false, error: 'unknown operation' });
   } catch (err) {
@@ -725,15 +784,71 @@ function withLock_(fn) { const l = LockService.getScriptLock(); l.waitLock(20000
 function appVerify_(req) {
   const code = str_(req.code).toLowerCase(), fp = str_(req.fp).toUpperCase();
   if (!/^[0-9a-f]{16}$/.test(code)) return { ok: true, state: 'unknown' };
-  const r = dRows_(ss_()).filter(function (x) { return str_(x.vcode) === code; })[0];
   const H = CFG.HOSPITAL, base = { ok: true, hospital: H.name, address: H.address, phone: H.phone, code: vcodeShow_(code) };
+  const c = certRows_().filter(function (x) { return str_(x.vcode) === code; })[0];
+  if (c) {
+    const now = sha256_(certPrinted_(c)).slice(0, 8).toUpperCase(), cs = c.status === 'W' ? 'withdrawn' : fp && fp !== now ? 'amended' : 'valid';
+    logIt_('', 'verify certificate: ' + cs, c.cert_no, '');
+    const o = Object.assign(base, { state: cs, kind: 'certificate', what: codeLabel2_(CTYPES, c.ctype).toLowerCase() + ' certificate', ds_no: c.cert_no, finalised_on: c.issued_on, fp: now });
+    if (cs !== 'withdrawn') o.details = [['Certificate', CTITLE[c.ctype] ? CTITLE[c.ctype].charAt(0) + CTITLE[c.ctype].slice(1).toLowerCase() : ''], ['Patient', (c.title ? c.title + ' ' : '') + c.patient], ['Husband’s / Father’s name', c.guardian],
+      c.ctype === 'A' ? ['Attendant', c.attendant + (c.relation ? ' (' + c.relation + ')' : '')] : null, c.ctype === 'F' ? ['Fit to resume from', dmy_(c.from_date)] : ['Period', dmy_(c.from_date) + ' to ' + dmy_(c.to_date) + ' (' + certDays_(c) + ' days)'],
+      c.ctype === 'R' || c.ctype === 'M' ? ['May resume on', dmy_(isoFromDay_(dayNo_(c.to_date) + 1))] : null, ['For', codeLabel2_(PURPOSES, c.purpose)], c.addressed_to ? ['Addressed to', c.addressed_to] : null,
+      ['Issued on', dmy_(c.issued_on)], ['Doctor', c.doctor], c.show_dx === 'Y' ? ['Diagnosis', c.dx] : null].filter(function (p) { return p && p[1]; });
+    else o.reason = c.withdraw_reason;
+    return o;
+  }
+  const r = dRows_(ss_()).filter(function (x) { return str_(x.vcode) === code; })[0];
   if (!r) { logIt_('', 'verify: not found', '', code.slice(0, 4)); return Object.assign(base, { state: 'unknown' }); }
   const now = sha256_(printedText_(r)).slice(0, 8).toUpperCase();
   const state = r.status !== 'F' ? 'withdrawn' : fp && fp !== now ? 'amended' : 'valid';
   logIt_('', 'verify: ' + state, r.ds_no, '');
-  const out = Object.assign(base, { state: state, ds_no: r.ds_no, finalised_on: str_(r.finalised_at).slice(0, 10), fp: now });
+  const out = Object.assign(base, { state: state, kind: 'summary', what: 'discharge summary', ds_no: r.ds_no, finalised_on: str_(r.finalised_at).slice(0, 10), fp: now });
   if (state !== 'withdrawn') { out.details = VERIFY_SHOW.map(function (k) { const c = colOf_(k); return [c.label, c.type === 'date' ? str_(r[k]).split('-').reverse().join('-') : str_(r[k])]; }).filter(function (p) { return p[1]; }); out.gp = gpLine_(r); }
   return out;
+}
+
+function certRows_() { const sh = ss_().getSheetByName('CERTIFICATES'); return sh ? readRows_(sh, CERT_COLS).filter(function (c) { return c.cert_no; }).map(function (c) { delete c._row; return c; }) : []; }
+// Issued online, once. The patient's details come from the final summary in the workbook, never from the phone.
+function certIssue_(u, req) {
+  if (!roleCan_(u.role, 'certify')) return { ok: false, error: 'only a consultant can issue certificates' };
+  const v = req.values || {}, cuid = str_(req.cuid);
+  if (!/^[0-9a-f]{24}$/.test(cuid)) return { ok: false, error: 'bad request' };
+  return withLock_(function () {
+    const ss = ss_(), sh = ss.getSheetByName('CERTIFICATES'), all = readRows_(sh, CERT_COLS);
+    const again = all.filter(function (c) { return c.cuid === cuid; })[0];
+    if (again) { delete again._row; return { ok: true, cert: again, already: true }; }                   // a retry after a lost answer
+    const r = dRows_(ss).filter(function (x) { return x.uid === str_(v.ds_uid); })[0];
+    if (!r) return { ok: false, error: 'that summary is not in the workbook yet; sync first' };
+    if (r.status !== 'F') return { ok: false, error: 'certificates are issued from final summaries only' };
+    const t = code_(v.ctype), doc = str_(r.consultant) || str_(req.by);
+    const c = { cuid: cuid, ds_uid: r.uid, ds_no: r.ds_no, ctype: t, purpose: code_(v.purpose) === 'S' ? 'S' : 'W', addressed_to: str_(v.addressed_to), patient: r.name, title: code_(r.marital) === 'S' ? 'Ms' : 'Mrs', guardian: r.father_husband, age: r.age,
+      admit_date: r.admit_date, discharge_date: r.discharge_date, birth_date: /deliver|caesarean|birth/i.test(r.final_diagnoses + ' ' + r.course) ? r.op_date : '',
+      attendant: t === 'A' ? str_(v.attendant) : '', relation: t === 'A' ? str_(v.relation) : '', from_date: str_(v.from_date), to_date: t === 'F' ? str_(v.from_date) : str_(v.to_date), exam_date: str_(v.exam_date),
+      issued_on: todayIso_(), show_dx: code_(v.show_dx) === 'Y' && t !== 'A' ? 'Y' : 'N', dx: code_(v.show_dx) === 'Y' && t !== 'A' ? str_(v.dx) : '', advice: t === 'A' ? '' : str_(v.advice), doctor: doc, status: 'I' };
+    const bad = certProblems_(c);
+    if (bad) return { ok: false, error: bad };
+    const top = all.reduce(function (m, x) { const k = /^MC-(\d+)$/.exec(x.cert_no); return k ? Math.max(m, +k[1]) : m; }, 0);
+    c.cert_no = 'MC-' + ('000' + (top + 1)).slice(-Math.max(4, String(top + 1).length));
+    c.vcode = randomHex_(16); c.issued_by = str_(req.by).slice(0, 60) || u.email; c.issued_at = nowTxt_();
+    writeRow_(sh, CERT_COLS, sh.getLastRow() + 1, c);
+    logIt_(u.email, 'certificate issued', r.ds_no, c.cert_no + ' ' + codeLabel2_(CTYPES, t));
+    return { ok: true, cert: c };
+  });
+}
+function certWithdraw_(u, req) {
+  if (!roleCan_(u.role, 'certify')) return { ok: false, error: 'only a consultant can withdraw certificates' };
+  const why = str_(req.reason).slice(0, 120);
+  if (why.length < 3) return { ok: false, error: 'give the reason' };
+  return withLock_(function () {
+    const sh = ss_().getSheetByName('CERTIFICATES'), c = readRows_(sh, CERT_COLS).filter(function (x) { return x.cert_no === str_(req.cert_no); })[0];
+    if (!c) return { ok: false, error: 'no such certificate' };
+    if (c.status === 'W') return { ok: true, already: true };
+    c.status = 'W'; c.withdrawn_by = str_(req.by).slice(0, 60) || u.email; c.withdrawn_at = nowTxt_(); c.withdraw_reason = why;
+    writeRow_(sh, CERT_COLS, c._row, c);
+    logIt_(u.email, 'certificate withdrawn', c.ds_no, c.cert_no + ': ' + why);
+    delete c._row;
+    return { ok: true, cert: c };
+  });
 }
 
 function appJoin_(req) {
@@ -782,7 +897,9 @@ function appPull_(u) {
     .map(function (q) { return { qid: q.qid, section: q.section, group: q.group, join: code_(q.join) || 'N', phrase: q.phrase, draft: q.status.toLowerCase() !== 'live', needs: code_(q.needs) }; });
   const templates = readRows_(ss.getSheetByName('TEMPLATES'), TEMPLATE_COLS).filter(function (t) { return t.name; }).map(function (t) { delete t._row; return t; });
   const staff = readRows_(ss.getSheetByName('STAFF'), STAFF_COLS).filter(function (s) { return s.name; }).map(function (s) { return { name: s.name, role: s.role.toLowerCase() === 'mo' ? 'mo' : 'consultant', specialty: s.specialty, qualifications: s.qualifications, phone: s.phone }; });
-  return { ok: true, email: u.email, role: u.role, roleName: ROLE_NAMES[u.role], version: CFG.VERSION, schema: CFG.SCHEMA_VER, today: todayIso_(), rows: rows, quick: quick, templates: templates, staff: staff };
+  const have = {}; rows.forEach(function (r) { have[r.uid] = true; });
+  const certs = certRows_().filter(function (c) { return have[c.ds_uid]; });
+  return { ok: true, email: u.email, role: u.role, roleName: ROLE_NAMES[u.role], version: CFG.VERSION, schema: CFG.SCHEMA_VER, today: todayIso_(), rows: rows, quick: quick, templates: templates, staff: staff, certs: certs };
 }
 function appSearch_(u, req) {
   const q = str_(req.q).toLowerCase();
