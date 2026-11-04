@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.3';
-const BUILD_ID = 'a18c23284f46';
+const BUILD_ID = '19a8b966bd02';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -1181,25 +1181,28 @@ function buildPdf(r, imgs) {
     drawBlock(M, CW, RIGHT[1], 9.5, true);
   }
   need(SIG); y -= 18;
-  const vurl = final && imgs && imgs.fp ? verifyUrl_(S && S.cfg && S.cfg.api, r, imgs.fp) : '';
-  if (vurl) {                                            // verification QR, bottom left: no patient data in it, only the code and the fingerprint
-    const qs = 66, qy = y + 12, qx = M, tx = M + qs + 10;
-    ops.push(qrOps(vurl, qx, qy, qs).ops);
-    Tk(tx, qy - 9, 'SCAN TO VERIFY THIS SUMMARY', 8, true, GREEN);
-    Tk(tx, qy - 22, 'Verification code', 7, false, GREY);
-    T_(tx, qy - 33, vcodeShow_(r.vcode), 10, true);
-    Tk(tx, qy - 45, 'Check the page opens at ' + VERIFY_PAGE.replace(/^https:\/\//, '').replace(/\/v\.html$/, ''), 6.5, false, GREY);
-    Tk(tx, qy - 54, 'or quote the code on ' + CFG.HOSPITAL.phone.replace(/^Ph: /, ''), 6.5, false, GREY);
-  }
-  lineH(PW - M - 200, y, PW - M);
-  Tk(PW - M - 200, y - 12, 'Signature of Consultant', 8.5, true, GREY);
-  if (r.consultant) {                                   // the consultant's details, printed once, here
-    const sx = PW - M - 200, lines = [[doc ? doc.name : r.consultant, true]];
+  const sx = PW - M - 200, sig = [];                    // the consultant's details, printed once, under the signature line
+  if (r.consultant) {
+    const lines = [[doc ? doc.name : r.consultant, true]];
     if (doc && doc.specialty) lines.push([doc.specialty, false]);
     if (doc && doc.qualifications) lines.push([doc.qualifications, false]);
     if (doc && doc.phone) lines.push(['Ph: ' + doc.phone, false]);
-    lines.forEach((l, i) => wrap(l[0], 9.5, 200, l[1]).forEach((t, j) => T_(sx, y - 24 - (i + j) * 12, t, 9.5, l[1])));
+    lines.forEach((l) => wrap(l[0], 9.5, 200, l[1]).forEach((t) => sig.push([t, l[1]])));
   }
+  const lastBase = y - 24 - Math.max(0, sig.length - 1) * 12;      // baseline of the consultant's last line
+  const vurl = final && imgs && imgs.fp ? verifyUrl_(S && S.cfg && S.cfg.api, r, imgs.fp) : '';
+  if (vurl) {                                            // verification QR, bottom left: from the signature line down to the consultant's last line
+    const qb = lastBase - 1.5, qs = Math.max(58, y - qb), qx = M, tx = M + qs + 10;
+    ops.push(qrOps(vurl, qx, qb + qs, qs).ops);
+    Tk(tx, qb + 47, 'SCAN TO VERIFY THIS SUMMARY', 8, true, GREEN);
+    Tk(tx, qb + 35, 'Verification code', 7, false, GREY);
+    T_(tx, qb + 23, vcodeShow_(r.vcode), 10, true);
+    Tk(tx, qb + 10.5, 'Check the page opens at ' + VERIFY_PAGE.replace(/^https:\/\//, '').replace(/\/v\.html$/, ''), 6.5, false, GREY);
+    Tk(tx, qb + 1.5, 'or quote the code on ' + CFG.HOSPITAL.phone.replace(/^Ph: /, ''), 6.5, false, GREY);
+  }
+  lineH(sx, y, PW - M);
+  Tk(sx, y - 12, 'Signature of Consultant', 8.5, true, GREY);
+  sig.forEach((l, i) => T_(sx, y - 24 - i * 12, l[0], 9.5, l[1]));
   // assemble the file
   const enc = new TextEncoder(), parts = [], offs = [];
   let len = 0;
