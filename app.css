@@ -185,3 +185,8 @@ body.dragging .bn#nav-settings { background: var(--chip); }
 .page.has-fab { padding-bottom: 160px; }
 .toast { bottom: 150px; }
 .actbar .btn .ico, .actbar .btn .ico svg { width: 20px; height: 20px; display: inline-block; vertical-align: -4px; }
+.rxmed { padding: 8px 0; border-bottom: 1px dashed var(--line); } .rxmed.off .small { opacity: .5; }
+.rxtop { display: flex; justify-content: space-between; align-items: center; gap: 8px; } .rxtop .chip.box { text-align: left; flex: 1; }
+.rxedit { display: grid; gap: 6px; margin-top: 6px; } .rxedit input { width: 100%; }
+.certprev .rxline { margin: 0 0 4px; font-size: 14px; }
+#rx-new { width: 100%; margin: 0 0 12px; }

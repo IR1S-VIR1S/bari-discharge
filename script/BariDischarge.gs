@@ -35,7 +35,7 @@
  */
 
 const CFG = {
-  VERSION: '1.9',
+  VERSION: '2.0',
   SCHEMA_VER: 4,                      // 2: obstetric layout (G/P, weeks, co-morbid, operation date, Hb/TLC/PLT); 3: follow-up calendar and patient phone; 4: verification code
   TZ: 'Asia/Karachi',
   MENU: 'Bari Discharge',
@@ -120,13 +120,14 @@ const STAFF_COLS = ['name', 'role', 'specialty', 'qualifications', 'phone'];
 // Medical certificates. Each is issued from a final summary by a consultant, once, and never edited: a mistake is withdrawn and a new one issued.
 // The patient's details are copied in at issue, so the certificate reads the same even if the summary is amended later.
 const CERT_COLS = ['cert_no', 'cuid', 'ds_uid', 'ds_no', 'ctype', 'purpose', 'addressed_to', 'patient', 'title', 'guardian', 'age', 'admit_date', 'discharge_date', 'birth_date',
-  'attendant', 'relation', 'from_date', 'to_date', 'exam_date', 'issued_on', 'show_dx', 'dx', 'advice', 'doctor', 'status', 'vcode', 'issued_by', 'issued_at', 'withdrawn_by', 'withdrawn_at', 'withdraw_reason'];
-const CTYPES = [['R', 'Sick leave'], ['M', 'Maternity leave'], ['F', 'Fitness to resume'], ['A', 'Attendant']];
-const CTITLE = { R: 'MEDICAL CERTIFICATE', M: 'MATERNITY LEAVE CERTIFICATE', F: 'CERTIFICATE OF FITNESS', A: 'ATTENDANT CERTIFICATE' };
+  'attendant', 'relation', 'from_date', 'to_date', 'exam_date', 'issued_on', 'show_dx', 'dx', 'advice', 'doctor', 'status', 'vcode', 'issued_by', 'issued_at', 'withdrawn_by', 'withdrawn_at', 'withdraw_reason',
+  'destination', 'passport', 'allergies', 'pregnant', 'meds'];
+const CTYPES = [['R', 'Sick leave'], ['M', 'Maternity leave'], ['F', 'Fitness to resume'], ['A', 'Attendant'], ['T', 'Travel prescription']];
+const CTITLE = { R: 'MEDICAL CERTIFICATE', M: 'MATERNITY LEAVE CERTIFICATE', F: 'CERTIFICATE OF FITNESS', A: 'ATTENDANT CERTIFICATE', T: 'TRAVEL PRESCRIPTION' };
 const PURPOSES = [['W', 'Work'], ['S', 'School, college or university']];
 const RELATIONS = ['Husband', 'Mother', 'Father', 'Sister', 'Brother', 'Mother-in-law', 'Son', 'Daughter'];
 const CERT_ADVICE = ['Avoid lifting heavy weight for 6 weeks', 'Light duties for 2 weeks', 'Shorter working hours for 2 weeks', 'Avoid prolonged standing for 2 weeks', 'Breastfeeding breaks during working hours'];
-const CERT_MAX = { R: 90, M: 180, F: 0, A: 30 };
+const CERT_MAX = { R: 90, M: 180, F: 0, A: 30, T: 365 };
 // Printed on every certificate and shown on the verification page. Worded as a limit of purpose, not as "invalid in law": a medical
 // certificate remains a document the doctor answers for, and injury or assault cases need a medico-legal certificate (MLC) from an authorised
 // Medico-Legal Officer at a designated hospital.
@@ -305,6 +306,12 @@ function certText_(c) {
   const resume = dayNo_(c.to_date) !== null ? isoFromDay_(dayNo_(c.to_date) + 1) : '';
   const since = walk ? dayNo_(c.exam_date) : dayNo_(c.issued_on);
   const out = [];
+  if (t === 'T') {
+    const trip = (dayNo_(c.from_date) !== null ? ', from ' + dmy_(c.from_date) + (dayNo_(c.to_date) !== null ? ' to ' + dmy_(c.to_date) : '') : '');
+    out.push('This is to certify that ' + who + rel + age + (str_(c.passport) ? ', passport number ' + code_(c.passport) : '') + ', ' + (walk ? 'was seen by me at Bari Hospital on ' + dmy_(c.exam_date) : 'is a patient of Bari Hospital') + ' and is travelling to ' + str_(c.destination) + trip + '.');
+    out.push('I have prescribed the medicines listed below for ' + P.her + ' personal use during this journey' + (/^(none|nil|no known|nkda)/i.test(str_(c.allergies)) ? '; no allergies are known.' : ', taking account of ' + P.her + ' allergy to ' + str_(c.allergies).replace(/\.$/, '') + '.'));
+    return out;
+  }
   if (t === 'A') {
     out.push('This is to certify that ' + str_(c.attendant) + (str_(c.relation) ? ' (' + str_(c.relation).toLowerCase() + ' of the patient)' : '') + ' stayed with ' + who + rel + age + ' as ' + P.her + ' attendant while ' + P.she + ' was in Bari Hospital, ' + per + '.' + (str_(c.birth_date) && /husband/i.test(c.relation) ? ' His wife gave birth on ' + dmy_(c.birth_date) + '.' : ''));
     out.push((/husband|father|brother|son/i.test(c.relation) ? 'His' : 'Her') + ' presence was needed to look after the patient during this period.');
@@ -331,6 +338,7 @@ function certProblems_(c) {
     if (ex > is || ex < is - 30) return 'the examination must be within the last 30 days';
     if (str_(c.doctor).length < 3) return 'choose the consultant';
   }
+  if (t === 'T') return rxProblems_(c);
   if (a === null) return t === 'F' ? 'choose the date of return' : 'choose the first day';
   if (t !== 'F' && (b === null || b < a)) return 'the last day must be on or after the first day';
   if (!walk && ad !== null && a < ad) return 'the certificate cannot start before the date of admission (' + dmy_(c.admit_date) + ')';
@@ -345,7 +353,69 @@ function certProblems_(c) {
   if (str_(c.advice).length > 400 || str_(c.addressed_to).length > 120 || str_(c.dx).length > 200 || str_(c.patient).length > 60 || str_(c.guardian).length > 60) return 'too long';
   return '';
 }
-function certPrinted_(c) { return [c.cert_no, c.ctype, c.patient, c.guardian, c.from_date, c.to_date, c.issued_on, c.doctor].concat(certText_(c)).map(str_).join('\u001f').toUpperCase(); }
+function certPrinted_(c) { return [c.cert_no, c.ctype, c.patient, c.guardian, c.from_date, c.to_date, c.issued_on, c.doctor].concat(certText_(c)).concat(code_(c.ctype) === 'T' ? [c.passport, c.allergies].concat(rxMeds_(c).map(function (m) { return m.join('|'); })) : []).map(str_).join('\u001f').toUpperCase(); }
+
+// Travel prescriptions (kind T): a standby kit a traveller carries, with a letter for customs. Issued, numbered (RX-), verified and withdrawn like a certificate.
+// Each medicine: brand and strength | generic | how to take | quantity | what it is for. The doctor ticks, edits or adds medicines before issue.
+// Flags (phone only): P = untick when pregnant or breastfeeding. Doses are adult defaults for the consultant to check.
+const TRAVEL_KIT = [
+  ['Flagyl 400 mg tablet', 'metronidazole 400 mg', '1 tablet three times a day for 5 days', '15', 'dysentery with mucus, or foul-smelling diarrhoea', ''],
+  ['Augmentin 625 mg tablet', 'co-amoxiclav (amoxicillin 500 mg + clavulanic acid 125 mg)', '1 tablet three times a day after food for 5 days', '15', 'chest, ear, sinus, throat, tooth or skin infection', ''],
+  ['Ciprofloxacin 500 mg tablet', 'ciprofloxacin 500 mg', '1 tablet twice a day for 3 days', '6', 'burning or frequent urination (urine infection)', 'P'],
+  ['Zetro 500 mg tablet', 'azithromycin 500 mg', '1 tablet once a day for 3 days', '3', 'severe diarrhoea, or diarrhoea with fever or blood; throat or chest infection', ''],
+  ['Moxiget 400 mg tablet', 'moxifloxacin 400 mg', '1 tablet once a day for 5 days', '5', 'chest infection or sinusitis not settling on Augmentin', 'P'],
+  ['Onset 8 mg tablet', 'ondansetron 8 mg', '1 tablet when needed, at most 2 in 24 hours', '6', 'nausea or vomiting', ''],
+  ['Spadix tablet', 'phloroglucinol 80 mg + trimethylphloroglucinol 80 mcg', '1 tablet when needed, up to three times a day', '10', 'stomach cramps', ''],
+  ['Nuberol Forte tablet', 'orphenadrine 50 mg + paracetamol 650 mg', '1 tablet when needed, up to three times a day', '10', 'muscle, back or neck pain', 'P'],
+  ['Panadol 500 mg tablet', 'paracetamol 500 mg', '2 tablets every 6 hours when needed, at most 8 in 24 hours', '20', 'fever, headache or pain', ''],
+  ['Starcox 90 mg tablet', 'etoricoxib 90 mg', '1 tablet once a day after food when needed', '5', 'joint pain, sprain or swelling', 'P'],
+  ['Velosef 500 mg capsule', 'cephradine 500 mg', '1 capsule twice a day for 5 days', '10', 'skin, throat or urine infection', ''],
+  ['Flutiaze nasal spray', 'azelastine 137 mcg + fluticasone 50 mcg per spray', '1 spray in each nostril twice a day', '1 bottle', 'blocked or runny nose, sinus or nasal allergy', ''],
+  ['Neo-Antial 5 mg tablet', 'desloratadine 5 mg', '1 tablet once a day when needed', '10', 'sneezing, itching or rash (allergy)', ''],
+  ['Rigix 10 mg tablet', 'cetirizine 10 mg', '1 tablet at night when needed', '10', 'itching, hives or allergy at night', ''],
+  ['Voltral Emulgel 1% gel', 'diclofenac diethylamine 1.16%', 'rub a thin layer on the painful area 3 to 4 times a day', '1 tube (50 g)', 'sprain, strain or muscle pain', 'P']];
+const RX_NOTE = 'FOR PERSONAL USE ONLY. The medicines listed are prescribed for the named traveller, for use during this journey only, and are carried in their original packaging with this prescription. They are not for sale or supply to anyone else. Rules on bringing medicines into a country differ; the traveller should check those of each country on the route before travel.';
+const RX_ALLERGY = [[/penicillin|amoxicillin|augmentin/i, /amoxicillin|ampicillin|penicillin|co-amoxiclav/i], [/quinolone|cipro|moxi/i, /floxacin/i], [/macrolide|azithro|erythro|clarithro/i, /azithromycin|erythromycin|clarithromycin/i],
+  [/cephalosporin|ceph|cef/i, /ceph|cef/i], [/nsaid|diclofenac|etoricoxib|ibuprofen|aspirin|brufen|ponstan/i, /diclofenac|etoricoxib|ibuprofen|naproxen|mefenamic|aspirin/i], [/metronidazole|flagyl/i, /metronidazole|tinidazole/i], [/paracetamol|panadol/i, /paracetamol/i]];
+function rxMeds_(c) { return str_(c.meds).split('\n').map(str_).filter(function (x) { return x; }).map(function (l) { return l.split('|').map(str_); }); }
+function rxLines_(c) { return rxMeds_(c).map(function (m, i) { return (i + 1) + '. ' + m[0] + ' (' + m[1] + '): ' + m[2] + '. Quantity ' + m[3] + '. For ' + m[4] + '.'; }); }
+// Cautions printed under the medicines: worked out from the generic names, so they also cover medicines the doctor adds.
+function rxCautions_(c) {
+  const g = rxMeds_(c).map(function (m) { return [m[0].split(' ')[0], m[1].toLowerCase(), m[0]]; }), has = function (re) { return g.filter(function (m) { return re.test(m[1]); }); };
+  const names = function (l) { return l.map(function (m) { return m[0]; }).join(', ').replace(/, ([^,]*)$/, ' and $1'); };
+  const out = [], para = has(/paracetamol/), ah = has(/cetirizine|desloratadine|loratadine|fexofenadine|levocetirizine/), qt = has(/azithromycin|clarithromycin|erythromycin|floxacin|ondansetron|domperidone/);
+  const ab = has(/metronidazole|amoxicillin|floxacin|azithromycin|cef|ceph|doxycycline|clarithromycin|nitrofurantoin/), fq = has(/floxacin/), ns = has(/etoricoxib|ibuprofen|naproxen|mefenamic|diclofenac/).filter(function (m) { return !/gel|cream|ointment|spray/i.test(m[2]); });
+  if (ab.length) out.push('Antibiotics are for the problem written against each one, not for colds or mild diarrhoea. Take one antibiotic at a time and finish its course.');
+  if (para.length > 1) out.push(names(para) + ' all contain paracetamol: do not take them together, and take no more than 4 g of paracetamol in 24 hours.');
+  if (ah.length > 1) out.push(names(ah) + ' are both for allergy: take one or the other, not both on the same day.');
+  if (ns.length > 1) out.push(names(ns) + ' are anti-inflammatory painkillers: take only one of them at a time.');
+  if (qt.length > 1) out.push(names(qt) + ' can affect the heart rhythm, more so together: avoid taking them at the same time, and seek help at once for palpitations or fainting.');
+  if (fq.length) out.push('Stop ' + names(fq) + ' and seek advice if a tendon (such as the back of the heel) becomes painful or swollen.');
+  if (has(/metronidazole|tinidazole/).length) out.push('No alcohol while taking ' + names(has(/metronidazole|tinidazole/)) + ' and for 2 days after.');
+  if (has(/orphenadrine|cetirizine/).length) out.push(names(has(/orphenadrine|cetirizine/)) + ' may cause drowsiness: do not drive after taking ' + (has(/orphenadrine|cetirizine/).length > 1 ? 'them' : 'it') + '.');
+  if (ab.length || has(/ondansetron/).length) out.push('For diarrhoea, drink oral rehydration solution. See a doctor if there is blood in the stool with high fever, fluids cannot be kept down, or there is no improvement after 48 hours.');
+  return out;
+}
+function rxProblems_(c) {
+  if (str_(c.destination).length < 2) return 'enter where the patient is travelling';
+  if (str_(c.destination).length > 80) return 'destination: too long';
+  if (str_(c.passport) && !/^[A-Z0-9]{6,12}$/.test(code_(c.passport))) return 'passport number: 6 to 12 letters and digits';
+  if (!str_(c.allergies)) return 'record allergies, or tap None known';
+  if (str_(c.allergies).length > 120) return 'allergies: too long';
+  const a = dayNo_(c.from_date), b = dayNo_(c.to_date);
+  if (str_(c.from_date) && a === null || str_(c.to_date) && b === null) return 'choose the travel dates';
+  if (a !== null && b !== null && b < a) return 'the return date must be on or after the departure date';
+  if (a !== null && b !== null && b - a + 1 > CERT_MAX.T) return 'at most ' + CERT_MAX.T + ' days of travel';
+  const m = rxMeds_(c);
+  if (!m.length) return 'tick at least one medicine';
+  if (m.length > 20) return 'at most 20 medicines';
+  for (let i = 0; i < m.length; i++) {
+    if (m[i].length !== 5 || m[i].some(function (x) { return !x || x.length > 90; })) return 'medicine ' + (i + 1) + ': fill in the name, generic, how to take, quantity and use (no | sign)';
+    const al = /^(none|nil|no known|nkda|none known)/i.test(str_(c.allergies)) ? null : RX_ALLERGY.filter(function (p) { return p[0].test(c.allergies) && p[1].test(m[i][1]); })[0];
+    if (al) return 'the patient is allergic (' + str_(c.allergies) + '): remove ' + m[i][0];
+  }
+  return '';
+}
 
 // ---------------------------------------------------------------- roles (shared with the phone)
 const ROLE_NAMES = { pi: 'PI', consultant: 'Consultant', mo: 'Medical officer' };
@@ -386,7 +456,7 @@ function onOpen() {                      // used only when this file is pasted o
   m.addToUi();
 }
 // What the loader calls. Every entry point must be listed here.
-const RELEASE_NOTE = 'search by number without BH- (also mobile); audit trail (old and new values, hash-chained); delete a summary from the phone (kept in DELETED); menu item to clear test records and start over; medical certificates (sick, maternity, fitness, attendant), also for walk-in patients; QR verification of final summaries; follow-up calendar (next visit, patient mobile, missed and rebook, WhatsApp reminder)';   // shown by "PI: install update"
+const RELEASE_NOTE = 'travel prescriptions (RX numbers: a standby medicine kit with a customs letter, allergy and pregnancy checks, cautions, QR); search by number without BH- (also mobile); audit trail (old and new values, hash-chained); delete a summary from the phone (kept in DELETED); menu item to clear test records and start over; medical certificates (sick, maternity, fitness, attendant), also for walk-in patients; QR verification of final summaries; follow-up calendar (next visit, patient mobile, missed and rebook, WhatsApp reminder)';   // shown by "PI: install update"
 function exports_() {
   return { VERSION: CFG.VERSION, RELEASE_NOTE: RELEASE_NOTE, SCHEMA_VER: CFG.SCHEMA_VER, MENU: CFG.MENU, MENU_ITEMS: MENU_ITEMS,
     setup: setup, menuUsers: menuUsers, menuInvite: menuInvite, menuRevoke: menuRevoke, menuApproveQuick: menuApproveQuick, menuReset: menuReset, menuAuditCheck: menuAuditCheck, doGet: doGet, doPost: doPost };
@@ -451,7 +521,7 @@ function buildAll_(ss) {
   seedQuick_(q);
   q.getRange(1, 1, 1, QUICK_COLS.length).setNotes([['Made by the system', 'Which section the button belongs to: ' + SECTIONS.join(', '), 'A heading that groups buttons inside a section',
     'N = new line, S = same line, C = same line after a comma', 'The text the button inserts. ___ marks a blank the doctor fills in', 'draft = PI phone only until approved; live = everyone', '', '', 'D or H: shown only when the Diabetes or Hypertension box is ticked']]);
-  sheet_(ss, 'CERTIFICATES', CERT_COLS, { wide: ['advice'] });
+  sheet_(ss, 'CERTIFICATES', CERT_COLS, { wide: ['advice', 'meds'] });
   const tp = sheet_(ss, 'TEMPLATES', TEMPLATE_COLS, { wide: SECTIONS });
   seedDefault_(tp); seedTemplates_(tp);
   const st = sheet_(ss, 'STAFF', STAFF_COLS);
@@ -905,8 +975,10 @@ function appVerify_(req) {
   if (c) {
     const now = sha256_(certPrinted_(c)).slice(0, 8).toUpperCase(), cs = c.status === 'W' ? 'withdrawn' : fp && fp !== now ? 'amended' : 'valid';
     logIt_('', 'verify certificate: ' + cs, c.cert_no, '');
-    const o = Object.assign(base, { state: cs, kind: 'certificate', what: codeLabel2_(CTYPES, c.ctype).toLowerCase() + ' certificate', ds_no: c.cert_no, finalised_on: c.issued_on, fp: now });
-    if (cs !== 'withdrawn') o.details = [['Certificate', CTITLE[c.ctype] ? CTITLE[c.ctype].charAt(0) + CTITLE[c.ctype].slice(1).toLowerCase() : ''], ['Patient', (c.title ? c.title + ' ' : '') + c.patient + (c.age ? ', ' + c.age : '')], [/^(Mr|Master|Ms|Miss)$/.test(c.title) ? 'Father’s name' : 'Husband’s / Father’s name', c.guardian], c.ds_uid ? null : ['Seen as', 'Outpatient (walk-in) on ' + dmy_(c.exam_date)],
+    const o = Object.assign(base, { state: cs, kind: 'certificate', what: c.ctype === 'T' ? 'travel prescription' : codeLabel2_(CTYPES, c.ctype).toLowerCase() + ' certificate', ds_no: c.cert_no, finalised_on: c.issued_on, fp: now });
+    if (cs !== 'withdrawn' && c.ctype === 'T') o.details = [['Document', 'Travel prescription'], ['Patient', (c.title ? c.title + ' ' : '') + c.patient + (c.age ? ', ' + c.age : '')], ['Passport', c.passport ? '****' + c.passport.slice(-4) : ''], ['Travelling to', c.destination],
+      ['Travel dates', c.from_date ? dmy_(c.from_date) + (c.to_date ? ' to ' + dmy_(c.to_date) : '') : ''], ['Allergies', c.allergies], ['Medicines', rxMeds_(c).map(function (m) { return m[0] + ', quantity ' + m[3]; }).join('; ')], ['Issued on', dmy_(c.issued_on)], ['Doctor', c.doctor]].filter(function (p) { return p[1]; });
+    else if (cs !== 'withdrawn') o.details = [['Certificate', CTITLE[c.ctype] ? CTITLE[c.ctype].charAt(0) + CTITLE[c.ctype].slice(1).toLowerCase() : ''], ['Patient', (c.title ? c.title + ' ' : '') + c.patient + (c.age ? ', ' + c.age : '')], [/^(Mr|Master|Ms|Miss)$/.test(c.title) ? 'Father’s name' : 'Husband’s / Father’s name', c.guardian], c.ds_uid ? null : ['Seen as', 'Outpatient (walk-in) on ' + dmy_(c.exam_date)],
       c.ctype === 'A' ? ['Attendant', c.attendant + (c.relation ? ' (' + c.relation + ')' : '')] : null, c.ctype === 'F' ? ['Fit to resume from', dmy_(c.from_date)] : ['Period', dmy_(c.from_date) + ' to ' + dmy_(c.to_date) + ' (' + certDays_(c) + ' days)'],
       c.ctype === 'R' || c.ctype === 'M' ? ['May resume on', dmy_(isoFromDay_(dayNo_(c.to_date) + 1))] : null, ['For', codeLabel2_(PURPOSES, c.purpose)], c.addressed_to ? ['Addressed to', c.addressed_to] : null,
       ['Issued on', dmy_(c.issued_on)], ['Doctor', c.doctor], c.show_dx === 'Y' ? ['Diagnosis', c.dx] : null].filter(function (p) { return p && p[1]; });
@@ -941,7 +1013,7 @@ function certIssue_(u, req) {
       if (!doc) return { ok: false, error: 'choose a consultant from the STAFF list' };
       c = { cuid: cuid, ds_uid: '', ds_no: '', ctype: t, purpose: code_(v.purpose) === 'S' ? 'S' : 'W', addressed_to: str_(v.addressed_to), patient: str_(v.patient).replace(/\s+/g, ' '), title: str_(v.title), guardian: str_(v.guardian).replace(/\s+/g, ' '), age: str_(v.age),
         admit_date: '', discharge_date: '', birth_date: t === 'M' && dayNo_(v.birth_date) !== null ? str_(v.birth_date) : '', attendant: '', relation: '', from_date: str_(v.from_date), to_date: t === 'F' ? str_(v.from_date) : str_(v.to_date), exam_date: str_(v.exam_date),
-        issued_on: todayIso_(), show_dx: code_(v.show_dx) === 'Y' ? 'Y' : 'N', dx: code_(v.show_dx) === 'Y' ? str_(v.dx) : '', advice: str_(v.advice), doctor: doc.name, status: 'I' };
+        issued_on: todayIso_(), show_dx: code_(v.show_dx) === 'Y' && t !== 'T' ? 'Y' : 'N', dx: code_(v.show_dx) === 'Y' && t !== 'T' ? str_(v.dx) : '', advice: t === 'T' ? '' : str_(v.advice), doctor: doc.name, status: 'I' };
     } else {
     const r = dRows_(ss).filter(function (x) { return x.uid === str_(v.ds_uid); })[0];
     if (!r) return { ok: false, error: 'that summary is not in the workbook yet; sync first' };
@@ -950,12 +1022,15 @@ function certIssue_(u, req) {
     c = { cuid: cuid, ds_uid: r.uid, ds_no: r.ds_no, ctype: t, purpose: code_(v.purpose) === 'S' ? 'S' : 'W', addressed_to: str_(v.addressed_to), patient: r.name, title: code_(r.marital) === 'S' ? 'Ms' : 'Mrs', guardian: r.father_husband, age: r.age,
       admit_date: r.admit_date, discharge_date: r.discharge_date, birth_date: /deliver|caesarean|birth/i.test(r.final_diagnoses + ' ' + r.course) ? r.op_date : '',
       attendant: t === 'A' ? str_(v.attendant) : '', relation: t === 'A' ? str_(v.relation) : '', from_date: str_(v.from_date), to_date: t === 'F' ? str_(v.from_date) : str_(v.to_date), exam_date: str_(v.exam_date),
-      issued_on: todayIso_(), show_dx: code_(v.show_dx) === 'Y' && t !== 'A' ? 'Y' : 'N', dx: code_(v.show_dx) === 'Y' && t !== 'A' ? str_(v.dx) : '', advice: t === 'A' ? '' : str_(v.advice), doctor: doc, status: 'I' };
+      issued_on: todayIso_(), show_dx: code_(v.show_dx) === 'Y' && t !== 'A' && t !== 'T' ? 'Y' : 'N', dx: code_(v.show_dx) === 'Y' && t !== 'A' && t !== 'T' ? str_(v.dx) : '', advice: t === 'A' || t === 'T' ? '' : str_(v.advice), doctor: doc, status: 'I' };
     }
+    if (t !== 'T') Object.assign(c, { destination: '', passport: '', allergies: '', pregnant: '', meds: '' });
+    else Object.assign(c, { to_date: str_(v.to_date), birth_date: '', purpose: 'W', addressed_to: '', destination: str_(v.destination).replace(/\s+/g, ' '), passport: code_(v.passport), allergies: str_(v.allergies).replace(/\s+/g, ' '), pregnant: code_(v.pregnant) === 'Y' ? 'Y' : 'N',
+      meds: str_(v.meds).split('\n').map(function (l) { return l.split('|').map(function (x) { return str_(x).replace(/\s+/g, ' '); }).join(' | '); }).filter(function (l) { return l.replace(/[\s|]/g, ''); }).join('\n') });
     const bad = certProblems_(c);
     if (bad) return { ok: false, error: bad };
-    const top = all.reduce(function (m, x) { const k = /^MC-(\d+)$/.exec(x.cert_no); return k ? Math.max(m, +k[1]) : m; }, 0);
-    c.cert_no = 'MC-' + ('000' + (top + 1)).slice(-Math.max(4, String(top + 1).length));
+    const pre = t === 'T' ? 'RX-' : 'MC-', top = all.reduce(function (m, x) { const k = /^(MC|RX)-(\d+)$/.exec(x.cert_no); return k && k[1] + '-' === pre ? Math.max(m, +k[2]) : m; }, 0);
+    c.cert_no = pre + ('000' + (top + 1)).slice(-Math.max(4, String(top + 1).length));
     c.vcode = randomHex_(16); c.issued_by = str_(req.by).slice(0, 60) || u.email; c.issued_at = nowTxt_();
     writeRow_(sh, CERT_COLS, sh.getLastRow() + 1, c);
     logIt_(u.email, 'certificate issued', c.ds_no || 'walk-in', c.cert_no + ' ' + codeLabel2_(CTYPES, t));
