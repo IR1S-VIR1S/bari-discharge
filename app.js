@@ -4,7 +4,7 @@
  * logic.js, which build.js copies from the workbook script itself, so phone and sheet always agree. */
 'use strict';
 const APP_VERSION = '1.7';
-const BUILD_ID = '6a4a054d370b';
+const BUILD_ID = 'd6e7fceeebf3';
 const IDLE_LOCK_MS = 5 * 60 * 1000;
 const PBKDF2_ROUNDS = 210000;
 let S = null;          // decrypted state: { cfg, server, outbox, lastSync, usage }
@@ -1102,14 +1102,14 @@ function certScreen(p) {
   const walk = !!p.walk, r = walk ? null : record(p.uid);
   if (!walk && (!r || r.status !== 'F')) return el('div', { class: 'page' }, topBar('Certificate', { back: true }), el('main', null, el('p', null, 'Certificates are issued from final summaries.')));
   if (!can('certify')) return el('div', { class: 'page' }, topBar('Certificate', { back: true }), el('main', null, el('p', null, 'Only a consultant can issue certificates.')));
-  const key = (walk ? 'walk-in' : p.uid) + (p.rx ? ':rx' : ''), today = dayIso(0);
+  const key = (walk ? 'walk-in' : p.uid) + (p.rx ? ':rx' : '') + (p.for ? ':' + p.for : ''), today = dayIso(0);
   if (!T.cert || T.cert.key !== key) {
     const mine = ((S.server && S.server.staff) || []).filter((x) => x.role === 'consultant' && normName(x.name) === normName(S.cfg.name))[0];
     T.cert = { key, cuid: rid(), v: walk
       ? { ctype: 'R', purpose: 'W', title: 'Mrs', patient: '', guardian: '', age: '', exam_date: today, from_date: today, to_date: '', show_dx: 'N', dx: '', advice: '', addressed_to: '', birth_date: '', doctor: mine ? mine.name : '' }
       : { ctype: 'R', purpose: 'W', from_date: s_(r.admit_date), to_date: '', exam_date: s_(r.discharge_date), show_dx: 'N', dx: s_(r.final_diagnoses).split('\n')[0], advice: '', attendant: s_(r.father_husband), relation: 'Husband', addressed_to: '' } };
     Object.assign(T.cert.v, { destination: '', passport: '', allergies: '', pregnant: 'N', kit: rxKit() });
-    if (p.rx) Object.assign(T.cert.v, { ctype: 'T', from_date: '', to_date: '' });
+    if (p.rx) Object.assign(T.cert.v, { ctype: 'T', from_date: '', to_date: '' }, p.pre || {});
   }
   const v = T.cert.v, adm = walk ? '' : s_(r.admit_date), dis = walk ? '' : s_(r.discharge_date);
   const birth = walk ? s_(v.birth_date) : /deliver|caesarean|birth/i.test(s_(r.final_diagnoses) + ' ' + s_(r.course)) ? s_(r.op_date) : '';
@@ -1146,7 +1146,7 @@ function certScreen(p) {
       el('div', { class: 'lab' }, 'Kind of certificate'), chipRow('ctype', kinds, t, (x) => set('ctype', x || 'R', true)),
       t === 'T' ? null : [el('div', { class: 'lab' }, 'For'), chipRow('purpose', PURPOSES, v.purpose, (x) => set('purpose', x || 'W')),
       el('label', { class: 'lab', for: 'c-to' }, 'Addressed to (optional)'), input('addressed_to', 'c-to', { ph: 'e.g. The Principal, ABC School. Blank: To whom it may concern' })]),
-    t === 'T' ? rxCards(v, { set, again, input, date, today, female: !male }) : null,
+    t === 'T' ? rxCards(v, { set, again, input, date, today, female: !male, r: walk ? null : r }) : null,
     t === 'A' ? el('div', { class: 'card' }, el('label', { class: 'lab', for: 'c-att' }, 'Attendant’s name'), input('attendant', 'c-att', { max: '60', cap: 'words' }),
       el('div', { class: 'lab' }, 'Relation to the patient'), chipRow('rel', RELATIONS.map((x) => [x, x]), v.relation, (x) => set('relation', x))) : null,
     t === 'T' ? null : el('div', { class: 'card' },
@@ -1183,6 +1183,12 @@ function certScreen(p) {
 function rxKit() { return TRAVEL_KIT.map((k) => ({ on: true, b: k[0], g: k[1], s: k[2], q: k[3], u: k[4], p: k[5] === 'P' })); }
 function rxMedsOf(kit) { return (kit || []).filter((k) => k.on).map((k) => [k.b, k.g, k.s, k.q, k.u].map((x) => s_(x).replace(/\|/g, '/')).join(' | ')).join('\n'); }
 function rxCards(v, o) {
+  // From a summary the prescription is for the patient; her husband (or anyone travelling with her) gets his own, issued as a walk-in with his details filled in.
+  const r = o.r, forWho = r ? el('div', { class: 'card', id: 'rx-for' }, el('h2', null, 'Prescription for'),
+    el('div', { class: 'chips' }, el('button', { class: 'chip on', type: 'button' }, 'The patient: ' + r.name),
+      el('button', { class: 'chip', type: 'button', id: 'rx-for-husband', onclick: () => go('cert', { walk: true, rx: true, for: r.uid + ':h', pre: { title: 'Mr', patient: s_(r.father_husband), guardian: '', age: '', doctor: s_(r.consultant), destination: s_(v.destination), from_date: s_(v.from_date), to_date: s_(v.to_date) } }) }, 'Her husband' + (s_(r.father_husband) ? ': ' + s_(r.father_husband) : '')),
+      el('button', { class: 'chip', type: 'button', id: 'rx-for-other', onclick: () => go('cert', { walk: true, rx: true, for: r.uid + ':o', pre: { title: 'Mr', patient: '', guardian: '', doctor: s_(r.consultant), destination: s_(v.destination), from_date: s_(v.from_date), to_date: s_(v.to_date) } }) }, 'Someone else travelling')),
+    el('div', { class: 'hint' }, 'Each traveller gets a prescription in their own name. Husband or someone else opens a separate form (a man, woman or child).')) : null;
   const DEST = ['Saudi Arabia (Umrah)', 'Saudi Arabia (Hajj)', 'United Arab Emirates', 'United Kingdom', 'Northern Pakistan'];
   const preg = v.pregnant === 'Y';
   const row = (k, i) => {
@@ -1196,7 +1202,7 @@ function rxCards(v, o) {
   };
   const dest = o.input('destination', 'rx-dest', { max: '80', cap: 'words', ph: 'country or place' });
   const al = o.input('allergies', 'rx-al', { max: '120', ph: 'e.g. penicillin (rash)' });
-  return [
+  return [forWho,
     el('div', { class: 'card', id: 'rx-trip' }, el('h2', null, 'Journey'),
       el('label', { class: 'lab', for: 'rx-dest' }, 'Travelling to'), dest,
       el('div', { class: 'chips' }, DEST.map((x) => el('button', { class: 'chip', type: 'button', onclick: () => { dest.value = x; o.set('destination', x); } }, x))),
@@ -1206,7 +1212,7 @@ function rxCards(v, o) {
       el('div', { class: 'hint' }, 'Customs officers match the prescription to the passport. The verification page shows only its last 4 characters.')),
     el('div', { class: 'card', id: 'rx-safety' }, el('h2', null, 'Allergies'), al,
       el('div', { class: 'chips' }, el('button', { class: 'chip', type: 'button', onclick: () => { al.value = 'None known'; o.set('allergies', 'None known'); } }, 'None known')),
-      el('div', { class: 'hint' }, 'A medicine of a class she is allergic to (penicillin, cephalosporin, quinolone, macrolide, NSAID, metronidazole, paracetamol) stops the prescription until it is unticked.'),
+      el('div', { class: 'hint' }, 'A medicine of a class the patient is allergic to (penicillin, cephalosporin, quinolone, macrolide, NSAID, metronidazole, paracetamol) stops the prescription until it is unticked.'),
       o.female ? el('button', { class: 'chip box' + (preg ? ' on' : ''), type: 'button', id: 'rx-preg', role: 'checkbox', 'aria-checked': preg ? 'true' : 'false', onclick: () => {
         v.pregnant = preg ? 'N' : 'Y';
         if (v.pregnant === 'Y') { const off = v.kit.filter((k) => k.on && k.p); off.forEach((k) => { k.on = false; }); if (off.length) toast('Unticked: ' + off.map((k) => k.b.split(' ')[0]).join(', ')); }
